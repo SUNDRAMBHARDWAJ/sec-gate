@@ -1,0 +1,11 @@
+# Tests and local dev files — not shipped to npm consumers
+*.test.js
+*.spec.js
+__tests__/
+.github/
+.git/
+.gitignore
+node_modules/
+
+# Downloaded binaries — created at install time via postinstall, not shipped
+vendor-bin/

@@ -1,0 +1,115 @@
+name: security-gate
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Install scanners (Semgrep, OSV-Scanner, govulncheck)
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install semgrep
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install github.com/google/osv-scanner/cmd/osv-scanner@v2.3.5
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Install sec-gate (local package)
+        run: npm i -g ./packages/security-gate
+
+      - name: Run sec-gate (tracked files)
+        id: gate
+        run: |
+          set +e
+          sec-gate scan > sec-gate.log 2>&1
+          code=$?
+          echo $code > sec-gate.exitcode
+          exit $code
+
+      - name: Comment PR with results
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- sec-gate -->';
+
+            let exitCode = 'unknown';
+            try {
+              exitCode = fs.readFileSync('sec-gate.exitcode', 'utf8').trim();
+            } catch {}
+
+            let log = '';
+            try {
+              log = fs.readFileSync('sec-gate.log', 'utf8');
+            } catch {
+              log = '(no log captured)';
+            }
+
+            const maxLen = 60000;
+            const truncated = log.length > maxLen ? (log.slice(0, maxLen) + '\n\n...(truncated)...\n') : log;
+
+            const body = [
+              marker,
+              '### security-gate scan',
+              '',
+              `Exit code: ${exitCode}`,
+              '',
+              '<details>',
+              '<summary>Click to expand output</summary>',
+              '',
+              '```',
+              truncated,
+              '```',
+              '',
+              '</details>'
+            ].join('\n');
+
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.info('No pull_request context; skipping comment');
+              return;
+            }
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              per_page: 100
+            });
+
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body
+              });
+            }

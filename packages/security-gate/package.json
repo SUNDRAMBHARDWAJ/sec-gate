@@ -1,0 +1,45 @@
+{
+  "name": "sec-gate",
+  "version": "0.1.0",
+  "description": "Pre-commit security gate for OWASP Top 10 2021 — SAST, SCA and misconfig checks for Node/Express, Go and React codebases",
+  "bin": {
+    "sec-gate": "bin/sec-gate.js"
+  },
+  "type": "commonjs",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "dependencies": {
+    "@pensar/semgrep-node": "^1.2.4"
+  },
+  "keywords": [
+    "security",
+    "owasp",
+    "sast",
+    "sca",
+    "pre-commit",
+    "semgrep",
+    "osv-scanner",
+    "govulncheck",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SUNDRAMBHARDWAJ/sec-gate.git"
+  },
+  "homepage": "https://github.com/SUNDRAMBHARDWAJ/sec-gate#readme",
+  "bugs": {
+    "url": "https://github.com/SUNDRAMBHARDWAJ/sec-gate/issues"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "scripts/",
+    "vendor-bin/.gitkeep",
+    "README.md"
+  ]
+}
