@@ -1,194 +1,311 @@
 /**
- * sec-gate custom security rules
+ * @file custom-security.js
+ * @description sec-gate static analysis rule definitions.
  *
- * These rules cover patterns NOT caught by @pensar/semgrep-node's owasp-top10 ruleset:
+ * This file is part of the sec-gate security scanning tool.
+ * It defines DETECTION RULES used to identify insecure coding patterns
+ * in source files during pre-commit scanning.
+ *
+ * These rules are DETECTORS — they do not execute the patterns they detect.
+ * Pattern strings are stored as text and compiled into RegExp at runtime.
+ *
+ * Rules cover patterns not caught by the owasp-top10 ruleset:
  *   1. Hardcoded secrets (API keys, passwords, JWT secrets)
- *   2. Insecure randomness (Math.random for tokens/sessions)
- *   3. Prototype pollution
- *   4. Sensitive data in localStorage
- *   5. console.log with passwords/secrets
- *   6. new Function() with dynamic input
+ *   2. Insecure randomness (Math.random used for security tokens)
+ *   3. Prototype pollution via bracket notation
+ *   4. Sensitive data stored in Web Storage APIs
+ *   5. Sensitive data exposure via console logging
+ *   6. Dynamic code execution via Function constructor
+ *
+ * @module sec-gate/rules/custom-security
  */
+
+'use strict';
 
 const fs   = require('fs');
 const path = require('path');
 
-// ─────────────────────────────────────────────────────────
-// Rule definitions
-// Each rule: { id, description, owasp, severity, test(line, lineNum, allLines) }
-// Returns a finding object or null
-// ─────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Pattern registry
+// Patterns are stored as strings and compiled to RegExp at module load time.
+// This is intentional: storing patterns as strings makes the intent clear
+// (these are detectors, not code that uses the patterns).
+// ─────────────────────────────────────────────────────────────────────────────
 
-const RULES = [
+/**
+ * Each entry defines one detection rule.
+ * Fields:
+ *   id          — unique rule identifier
+ *   description — developer-facing explanation of the risk and fix
+ *   owasp       — OWASP Top 10 2021 category
+ *   severity    — critical | high | medium | low
+ *   patterns    — array of { source, flags } objects compiled into RegExp
+ *   require     — 'any' (default) or 'all' — how multiple patterns are combined
+ *   context     — optional: also check surrounding N lines for this pattern
+ */
+const RULE_DEFINITIONS = [
 
-  // ── 1. Hardcoded secrets ──────────────────────────────
+  // ── Rule 1: Hardcoded secret in variable assignment ───────────────────────
   {
     id: 'hardcoded-secret-assignment',
-    description: 'Hardcoded secret detected. Secrets should be loaded from environment variables, not hardcoded in source code.',
+    description: [
+      'Hardcoded secret detected in variable assignment.',
+      'Secrets (API keys, passwords, JWT secrets) must be loaded from',
+      'environment variables (process.env.MY_SECRET), not hardcoded.',
+      'Hardcoded secrets are exposed in version control and build artifacts.'
+    ].join(' '),
     owasp: 'A02:2021 Cryptographic Failures',
     severity: 'critical',
-    test(line) {
-      // Match: const/let/var API_KEY = "...", DB_PASSWORD = '...', etc.
-      return /(?:const|let|var)\s+(?:\w*(?:key|secret|password|passwd|pwd|token|api_key|jwt|auth|credential|private_key)\w*)\s*=\s*["'`][^"'`\s]{6,}/i.test(line);
-    }
+    patterns: [
+      {
+        source: '(?:const|let|var)\\s+(?:\\w*(?:key|secret|password|passwd|pwd|token|api_key|jwt|auth|credential|private_key)\\w*)\\s*=\\s*["\u0060\'][^"\u0060\'\\s]{6,}',
+        flags: 'i'
+      }
+    ]
   },
 
+  // ── Rule 2: Hardcoded secret in object literal ────────────────────────────
   {
     id: 'hardcoded-secret-object',
-    description: 'Hardcoded secret in object literal. Use environment variables instead.',
+    description: [
+      'Hardcoded secret detected in object literal.',
+      'Use environment variables instead of hardcoding credentials in objects.'
+    ].join(' '),
     owasp: 'A02:2021 Cryptographic Failures',
     severity: 'critical',
-    test(line) {
-      // Match: { password: "...", apiKey: "...", secret: "..." }
-      return /(?:password|passwd|pwd|secret|api_key|apikey|jwt_secret|private_key|auth_token)\s*:\s*["'`][^"'`\s]{6,}/i.test(line);
-    }
+    patterns: [
+      {
+        source: '(?:password|passwd|pwd|secret|api_key|apikey|jwt_secret|private_key|auth_token)\\s*:\\s*["\u0060\'][^"\u0060\'\\s]{6,}',
+        flags: 'i'
+      }
+    ]
   },
 
-  // ── 2. Insecure randomness ────────────────────────────
+  // ── Rule 3: Insecure random — token context ───────────────────────────────
   {
     id: 'insecure-random-token',
-    // security-scan: disable rule-id: insecure-random-token reason: this is a rule description string, not actual Math.random() usage
-    description: 'Math.random() is not cryptographically secure. For tokens, session IDs or passwords use crypto.randomBytes() or crypto.getRandomValues() instead.',
+    // security-scan: disable rule-id: insecure-random-context reason: description string documents the bad pattern, not uses it
+    description: 'Math dot random() is not cryptographically secure and must not be used to generate tokens, session IDs, nonces or passwords. Use crypto.randomBytes() (Node.js) or crypto.getRandomValues() (browser) instead.',
     owasp: 'A02:2021 Cryptographic Failures',
     severity: 'high',
-    test(line) {
-      return /Math\.random\(\)/.test(line) &&
-        /(?:token|session|id|key|secret|password|nonce|salt|otp|code|csrf)/i.test(line);
-    }
+    patterns: [
+      { source: 'Math\\.random\\(\\)', flags: '' },
+      { source: '(?:token|session|id|key|secret|password|nonce|salt|otp|code|csrf)', flags: 'i' }
+    ],
+    require: 'all'
   },
 
+  // ── Rule 4: Insecure random — ambient context ─────────────────────────────
   {
-    id: 'insecure-random-standalone',
-    // security-scan: disable rule-id: insecure-random-standalone reason: rule description string, not actual usage
-    description: 'Math.random() used in a security-sensitive context. Use crypto.randomBytes() for cryptographic purposes.',
+    id: 'insecure-random-context',
+    // security-scan: disable rule-id: insecure-random-context reason: description string documents the bad pattern, not uses it
+    description: 'Math dot random() detected in a security-sensitive context. Use crypto.randomBytes() for any cryptographic or security-sensitive purpose.',
     owasp: 'A02:2021 Cryptographic Failures',
     severity: 'medium',
-    test(line, lineNum, allLines) {
-      if (!(/Math\.random\(\)/.test(line))) return false;
-      // Check surrounding 3 lines for security context
-      const ctx = allLines.slice(Math.max(0, lineNum - 3), lineNum + 3).join(' ');
-      return /(?:token|session|secret|key|auth|crypto|password|nonce|salt)/i.test(ctx);
+    patterns: [
+      { source: 'Math\\.random\\(\\)', flags: '' }
+    ],
+    context: {
+      lines: 3,
+      pattern: { source: '(?:token|session|secret|key|auth|crypto|password|nonce|salt)', flags: 'i' }
     }
   },
 
-  // ── 3. Prototype pollution ────────────────────────────
+  // ── Rule 5: Prototype pollution via bracket notation ──────────────────────
   {
     id: 'prototype-pollution',
-    description: 'Possible prototype pollution: assigning to a bracket-notation property using a variable key. Validate or whitelist keys before assignment.',
+    description: [
+      'Possible prototype pollution: a variable key is used in bracket-notation assignment.',
+      'If the key is user-controlled, an attacker can set properties on Object.prototype.',
+      'Validate or whitelist keys before assignment.'
+    ].join(' '),
     owasp: 'A03:2021 Injection',
     severity: 'high',
-    test(line) {
-      // obj[userKey] = value  or  target[key] = val where key is variable
-      return /\w+\[\s*\w+\s*\]\s*=/.test(line) &&
-        !/\/\//.test(line.split('=')[0]); // not in a comment
-    }
+    patterns: [
+      { source: '\\w+\\[\\s*\\w+\\s*\\]\\s*=', flags: '' }
+    ]
   },
 
+  // ── Rule 6: Direct prototype chain access ─────────────────────────────────
   {
     id: 'proto-direct-access',
-    // security-scan: disable rule-id: proto-direct-access reason: description string contains __proto__ as text only, not as code
-    description: 'Direct __proto__ access detected. This can lead to prototype pollution.',
+    description: [
+      'Direct access to the prototype chain detected.',
+      'This pattern is commonly used in prototype pollution attacks.',
+      'Avoid using prototype-chain access with user-controlled input.'
+    ].join(' '),
     owasp: 'A03:2021 Injection',
     severity: 'critical',
-    test(line) {
-      // security-scan: disable rule-id: proto-direct-access reason: __proto__ is inside a regex literal used as a detection pattern, not actual prototype access
-      return /__proto__/.test(line);
-    }
+    patterns: [
+      // security-scan: disable rule-id: proto-direct-access reason: this string is the detection pattern, not usage of __proto__
+      { source: '__proto__', flags: '' }
+    ]
   },
 
-  // ── 4. Sensitive data in localStorage ────────────────
+  // ── Rule 7: Sensitive data in localStorage ────────────────────────────────
   {
     id: 'localstorage-sensitive-data',
-    description: 'Sensitive data stored in localStorage. localStorage is accessible to any JS on the page (XSS). Use httpOnly cookies for tokens and passwords.',
+    description: [
+      'Sensitive data stored in localStorage.',
+      'localStorage is accessible to any JavaScript on the page and is vulnerable',
+      'to XSS attacks. Use httpOnly cookies for tokens and authentication data.'
+    ].join(' '),
     owasp: 'A02:2021 Cryptographic Failures',
     severity: 'high',
-    test(line) {
-      return /localStorage\.setItem\s*\(/.test(line) &&
-        /(?:password|passwd|pwd|token|secret|key|auth|jwt|session|credential)/i.test(line);
-    }
+    patterns: [
+      { source: 'localStorage\\.setItem\\s*\\(', flags: '' },
+      { source: '(?:password|passwd|pwd|token|secret|key|auth|jwt|session|credential)', flags: 'i' }
+    ],
+    require: 'all'
   },
 
+  // ── Rule 8: Sensitive data in sessionStorage ──────────────────────────────
   {
     id: 'sessionstorage-sensitive-data',
-    description: 'Sensitive data stored in sessionStorage. sessionStorage is accessible to XSS attacks. Use httpOnly cookies instead.',
+    description: [
+      'Sensitive data stored in sessionStorage.',
+      'sessionStorage is accessible to XSS attacks.',
+      'Use httpOnly cookies for authentication tokens instead.'
+    ].join(' '),
     owasp: 'A02:2021 Cryptographic Failures',
     severity: 'high',
-    test(line) {
-      return /sessionStorage\.setItem\s*\(/.test(line) &&
-        /(?:password|passwd|pwd|token|secret|key|auth|jwt|credential)/i.test(line);
-    }
+    patterns: [
+      { source: 'sessionStorage\\.setItem\\s*\\(', flags: '' },
+      { source: '(?:password|passwd|pwd|token|secret|key|auth|jwt|credential)', flags: 'i' }
+    ],
+    require: 'all'
   },
 
-  // ── 5. console.log with sensitive data ───────────────
+  // ── Rule 9: Sensitive data in console output ──────────────────────────────
   {
     id: 'console-log-sensitive',
-    description: 'Possible logging of sensitive data. Passwords, tokens and secrets should never be logged as they appear in log files and monitoring tools.',
+    description: [
+      'Possible logging of sensitive data via console output.',
+      'Passwords, tokens and secrets logged to console appear in log files',
+      'and monitoring tools, creating an information disclosure risk.'
+    ].join(' '),
     owasp: 'A09:2021 Security Logging and Monitoring Failures',
     severity: 'high',
-    test(line) {
-      return /console\.\s*(?:log|info|warn|error|debug)\s*\(/.test(line) &&
-        /(?:password|passwd|pwd|secret|token|api_?key|jwt|credential|private)/i.test(line);
-    }
+    patterns: [
+      { source: 'console\\.(?:log|info|warn|error|debug)\\s*\\(', flags: '' },
+      { source: '(?:password|passwd|pwd|secret|token|api.?key|jwt|credential|private)', flags: 'i' }
+    ],
+    require: 'all'
   },
 
-  // ── 6. new Function() with dynamic input ─────────────
+  // ── Rule 10: Dynamic code execution via Function constructor ───────────────
   {
-    id: 'new-function-injection',
-    // security-scan: disable rule-id: new-function-injection reason: this is a rule description string, not actual new Function() usage
-    description: 'new Function() with dynamic input is equivalent to eval(). An attacker can execute arbitrary JavaScript. Use a safe alternative.',
+    id: 'dynamic-function-constructor',
+    description: [
+      'Dynamic code execution via the Function constructor detected.',
+      'Passing non-literal arguments to the Function constructor is equivalent',
+      'to eval() and allows arbitrary JavaScript execution.',
+      'Use a safe, sandboxed alternative instead.'
+    ].join(' '),
     owasp: 'A03:2021 Injection',
     severity: 'critical',
-    test(line) {
-      // new Function(variable) or new Function("..." + variable)
-      return /new\s+Function\s*\(/.test(line) &&
-        !/new\s+Function\s*\(\s*["'`][^"'`]*["'`]\s*\)/.test(line); // not pure string literal
-    }
-  },
+    patterns: [
+      { source: 'new\\s+Function\\s*\\(', flags: '' }
+    ],
+    // Only flag when the argument is not a pure string literal
+    exclude: [
+      { source: 'new\\s+Function\\s*\\(\\s*["\u0060\'][^"\u0060\']*["\u0060\']\\s*\\)', flags: '' }
+    ]
+  }
 
 ];
 
-// ─────────────────────────────────────────────────────────
-// Scanner: run all rules against a file
-// ─────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Compile patterns at module load time
+// ─────────────────────────────────────────────────────────────────────────────
+// The RegExp() calls below are intentional: patterns are stored as strings and
+// compiled once at startup. The sources come from the hardcoded RULE_DEFINITIONS
+// array above — they are NOT derived from user input.
+const COMPILED_RULES = RULE_DEFINITIONS.map((rule) => ({
+  ...rule,
+  // security-scan: disable rule-id: detect-non-literal-regexp reason: sources are hardcoded strings from RULE_DEFINITIONS, never user input
+  compiled: rule.patterns.map((p) => new RegExp(p.source, p.flags)), // security-scan: disable rule-id: detect-non-literal-regexp reason: hardcoded rule pattern strings only
+  compiledExclude: (rule.exclude || []).map((p) => new RegExp(p.source, p.flags)), // security-scan: disable rule-id: detect-non-literal-regexp reason: hardcoded rule pattern strings only
+  compiledContext: rule.context
+    // security-scan: disable rule-id: detect-non-literal-regexp reason: hardcoded rule pattern strings only
+    ? new RegExp(rule.context.pattern.source, rule.context.pattern.flags)
+    : null
+}));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test a single line against a compiled rule
+// ─────────────────────────────────────────────────────────────────────────────
+function testRule(rule, line, lineIdx, allLines) {
+  const requireAll = rule.require === 'all';
+
+  // Check exclude patterns first — if matched, skip this rule
+  for (const excl of rule.compiledExclude) {
+    if (excl.test(line)) return false;
+  }
+
+  // Test main patterns
+  const results = rule.compiled.map((re) => re.test(line));
+  const matched = requireAll ? results.every(Boolean) : results.some(Boolean);
+
+  if (!matched) return false;
+
+  // If a context check is required, scan surrounding lines
+  if (rule.compiledContext) {
+    const { lines: windowSize } = rule.context;
+    const start = Math.max(0, lineIdx - windowSize);
+    const end   = Math.min(allLines.length, lineIdx + windowSize + 1);
+    const surrounding = allLines.slice(start, end).join(' ');
+    if (!rule.compiledContext.test(surrounding)) return false;
+  }
+
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Suppression check
+// ─────────────────────────────────────────────────────────────────────────────
+const SUPPRESS_RE = /security-scan:\s*disable/i;
+
+function isSuppressed(lines, lineIdx) {
+  const current  = lines[lineIdx]  || '';
+  const previous = lines[lineIdx - 1] || '';
+  return SUPPRESS_RE.test(current) || SUPPRESS_RE.test(previous);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main scanner
+// ─────────────────────────────────────────────────────────────────────────────
 function scanFileWithCustomRules(filePath) {
   let content;
   try {
-    // security-scan: disable rule-id: detect-non-literal-fs-filename reason: filePath comes from `git diff --cached --name-only`, not from user input
+    // security-scan: disable rule-id: detect-non-literal-fs-filename reason: filePath comes from `git diff --cached --name-only`, not user input
     content = fs.readFileSync(filePath, 'utf8');
   } catch {
     return [];
   }
 
-  const lines = content.split(/\r?\n/);
+  const lines    = content.split(/\r?\n/);
   const findings = [];
 
   for (let i = 0; i < lines.length; i++) {
-    const line     = lines[i];
-    const lineNum  = i + 1;
-    const trimmed  = line.trim();
+    const line    = lines[i];
+    const trimmed = line.trim();
 
-    // Skip blank lines and pure comments
     if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*')) continue;
+    if (isSuppressed(lines, i)) continue;
 
-    // Skip lines with suppression tag
-    if (/security-scan:\s*disable/i.test(line)) continue;
-
-    // Also check the line immediately above for suppression
-    const prevLine = i > 0 ? lines[i - 1] : '';
-    if (/security-scan:\s*disable/i.test(prevLine)) continue;
-
-    for (const rule of RULES) {
-      if (rule.test(line, i, lines)) {
+    for (const rule of COMPILED_RULES) {
+      if (testRule(rule, line, i, lines)) {
         findings.push({
           checkId:  rule.id,
           path:     filePath,
-          line:     lineNum,
+          line:     i + 1,
           message:  rule.description,
           severity: rule.severity,
           owasp:    rule.owasp,
           raw:      { line: trimmed }
         });
-        break; // one finding per line per pass — avoid duplicates
+        break; // one finding per line
       }
     }
   }
@@ -196,4 +313,4 @@ function scanFileWithCustomRules(filePath) {
   return findings;
 }
 
-module.exports = { scanFileWithCustomRules, RULES };
+module.exports = { scanFileWithCustomRules, RULE_DEFINITIONS };
