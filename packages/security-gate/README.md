@@ -11,22 +11,56 @@ Supports **inline suppression** so developers can acknowledge known false positi
 
 ---
 
-## Install — one command, everything is set up automatically
+## Getting started — developer setup
+
+### Step 1 — Install the tool globally (once per machine)
 
 ```bash
 npm install -g sec-gate
 ```
 
-That's it. This single command:
+This single command installs the `sec-gate` CLI and automatically downloads **osv-scanner** and **govulncheck** for you. No separate tool installs needed.
 
-1. Installs the `sec-gate` CLI globally
-2. Downloads the **osv-scanner** binary for your OS automatically
-3. Installs **govulncheck** via `go install` (if Go is available on your machine)
-4. **Installs the pre-commit hook** in your current git repo automatically
+> You only run this once per machine, not once per project.
 
-No extra steps. No separate tool installs. Your next `git commit` is already security-checked.
+---
 
-> **Note:** If you run `npm install -g sec-gate` from outside a git repo (e.g. your home directory), run `sec-gate install` once inside the repo afterwards.
+### Step 2 — Connect it to your repo (once per cloned repo)
+
+```bash
+cd your-project      # go into the cloned repo root
+sec-gate install     # writes the pre-commit hook into .git/hooks/
+```
+
+This tells Git to run `sec-gate scan` automatically before every commit in this repo.
+
+> **You must run this in every repo you want protected.** The global install alone does not activate the hook anywhere — it just makes the `sec-gate` command available on your machine.
+
+---
+
+### Step 3 — Develop normally, commit as usual
+
+```bash
+git add src/services/payment.js src/routes/user.js
+git commit -m "feat: add payment service"   # scan fires automatically here
+```
+
+No extra commands. The hook handles everything.
+
+---
+
+### Full example from scratch
+
+```bash
+# On a fresh machine or a fresh clone:
+npm install -g sec-gate        # Step 1 — install tool globally (once per machine)
+cd fmt-os                      # go into your project
+sec-gate install               # Step 2 — hook up this repo (once per clone)
+
+# Now develop as normal:
+git add .
+git commit -m "my changes"    # Step 3 — scan runs automatically here
+```
 
 ---
 
@@ -102,7 +136,7 @@ SEC_GATE_SKIP=1 git commit -m "emergency fix"
 
 ## Auto-setup for the whole team (optional but recommended)
 
-Add this to your **project's** `package.json` so every developer gets the hook automatically when they run `npm install`:
+To avoid teammates forgetting `sec-gate install`, add this to your **project's** `package.json`:
 
 ```json
 "scripts": {
@@ -110,12 +144,16 @@ Add this to your **project's** `package.json` so every developer gets the hook a
 }
 ```
 
-Then the workflow for any new developer joining the team is:
+Then the full onboarding flow for any new developer is just two commands:
 
 ```bash
-npm install -g sec-gate   # global tool install (once per machine)
-npm install               # prepare script auto-installs the hook
+npm install -g sec-gate   # Step 1 — install tool globally (once per machine)
+npm install               # Step 2 — prepare script auto-runs sec-gate install
 ```
+
+No need to remember `sec-gate install` separately — `npm install` handles it.
+
+> Tip: document these two commands in your project's `CONTRIBUTING.md` so every new joiner knows the setup.
 
 ---
 
