@@ -38,7 +38,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/SUNDRAMBHARDWAJ/sec-gate.git"
+    "url": "git+https://github.com/SUNDRAMBHARDWAJ/sec-gate.git"
   },
   "homepage": "https://github.com/SUNDRAMBHARDWAJ/sec-gate#readme",
   "bugs": {
