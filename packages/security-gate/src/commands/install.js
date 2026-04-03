@@ -102,6 +102,11 @@ function standaloneHook() {
  * Returns the absolute path to the pre-commit hook file that git WILL execute.
  * This is the single source of truth — works regardless of which hook manager
  * set core.hooksPath.
+ *
+ * Special cases handled:
+ *  - .husky/_  → husky's internal bootstrap shim dir, read-only, never write here.
+ *                Fall back to .husky/pre-commit (the real hook file).
+ *  - .husky    → husky v6+ standard hooks dir, use .husky/pre-commit directly.
  */
 function resolveGitHookPath(repoRoot) {
   let hooksDir;
@@ -118,6 +123,15 @@ function resolveGitHookPath(repoRoot) {
       hooksDir = path.isAbsolute(configured)
         ? configured
         : path.join(repoRoot, configured);
+
+      // .husky/_ is husky's internal bootstrap shim directory — it is read-only
+      // and should never be written to. The actual user-editable hooks live in
+      // .husky/ (one level up). Redirect there.
+      const huskyShimDir = path.join(repoRoot, '.husky', '_');
+      if (hooksDir === huskyShimDir || hooksDir.startsWith(huskyShimDir + path.sep)) {
+        console.log('sec-gate: core.hooksPath points to .husky/_ (husky bootstrap shim) — redirecting to .husky/');
+        hooksDir = path.join(repoRoot, '.husky');
+      }
     }
   } catch {
     // core.hooksPath not set — use default
