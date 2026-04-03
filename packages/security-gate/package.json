@@ -1,6 +1,6 @@
 {
   "name": "sec-gate",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Pre-commit security gate for OWASP Top 10 2021 — SAST, SCA and misconfig checks for Node/Express, Go and React codebases",
   "author": {
     "name": "Sundram Bhardwaj",
@@ -50,6 +50,7 @@
     "scripts/",
     "rules/",
     "vendor-bin/.gitkeep",
-    "README.md"
+    "README.md",
+    "sec-gate.example.yml"
   ]
 }

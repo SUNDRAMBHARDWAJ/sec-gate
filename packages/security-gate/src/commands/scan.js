@@ -6,11 +6,18 @@ const { runOsvScanner } = require('../scanners/osv');
 const { runGovulncheck } = require('../scanners/govulncheck');
 const { applyInlineSuppressions } = require('../suppressions/inlineTag');
 const { scanFileWithCustomRules } = require('../../rules/custom-security');
+const { loadConfig, meetsThreshold, isExcludedPath } = require('../config/loader');
+const { getRepoRoot } = require('../git/repo');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
 function formatFinding(f) {
-  const loc = f.line ? `${f.path}:${f.line}` : f.path;
+  const loc  = f.line ? `${f.path}:${f.line}` : f.path;
   const owasp = f.owasp ? ` (${f.owasp})` : '';
-  return `- ${loc} [${f.checkId}]${owasp}\n  ${f.message}`;
+  const sev  = f.severity ? ` [${f.severity.toUpperCase()}]` : '';
+  return `- ${loc}${sev} [${f.checkId}]${owasp}\n  ${f.message}`;
 }
 
 const LOCKFILES = new Set([
@@ -22,61 +29,121 @@ const LOCKFILES = new Set([
   'go.sum'
 ]);
 
-function isSemgrepTargetPath(p) {
+function isSemgrepTargetPath(p, config) {
   if (!p) return false;
 
   const base = require('path').basename(p);
   if (LOCKFILES.has(base)) return false;
 
+  // Skip paths excluded in config
+  if (isExcludedPath(p, config.exclude_paths)) return false;
+
   return (
-    p.endsWith('.js') ||
+    p.endsWith('.js')  ||
     p.endsWith('.jsx') ||
     p.endsWith('.mjs') ||
     p.endsWith('.cjs') ||
-    p.endsWith('.ts') ||
+    p.endsWith('.ts')  ||
     p.endsWith('.tsx') ||
     p.endsWith('.go')
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Apply config filters to findings list
+// ─────────────────────────────────────────────────────────────────────────────
+function applyConfigFilters(findings, config) {
+  const excludedRules  = new Set(config.exclude_rules || []);
+  const threshold      = config.severity_threshold || 'all';
+
+  const excluded  = [];
+  const belowThreshold = [];
+  const remaining = [];
+
+  for (const f of findings) {
+    // 1. Exclude by rule ID
+    if (excludedRules.has(f.checkId)) {
+      excluded.push(f);
+      continue;
+    }
+
+    // 2. Exclude by path
+    if (isExcludedPath(f.path || '', config.exclude_paths)) {
+      excluded.push(f);
+      continue;
+    }
+
+    // 3. Filter by severity threshold
+    if (!meetsThreshold(f.severity, threshold)) {
+      belowThreshold.push(f);
+      continue;
+    }
+
+    remaining.push(f);
+  }
+
+  return { remaining, excluded, belowThreshold };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main scan
+// ─────────────────────────────────────────────────────────────────────────────
 async function scan({ staged }) {
-  const files = staged ? getStagedFiles() : listTrackedFiles();
+  // Load per-repo config (.sec-gate.yml)
+  let repoRoot;
+  try { repoRoot = getRepoRoot(); } catch { repoRoot = process.cwd(); }
+  const config = loadConfig(repoRoot);
+
+  const files      = staged ? getStagedFiles() : listTrackedFiles();
   const depChanged = staged ? hasStagedDependencyFiles(files) : true;
 
   // eslint-disable-next-line no-console
   console.log(`sec-gate: scan started (${staged ? 'staged files' : 'tracked files'})`);
 
-  const allFindings = [];
-  const semgrepTargets = (files || []).filter(isSemgrepTargetPath);
+  // Print active config summary
+  if (config.severity_threshold !== 'all') {
+    // eslint-disable-next-line no-console
+    console.log(`sec-gate: severity threshold: ${config.severity_threshold} and above`);
+  }
+  if (config.exclude_rules.length > 0) {
+    // eslint-disable-next-line no-console
+    console.log(`sec-gate: excluding ${config.exclude_rules.length} high-noise rule(s)`);
+  }
 
+  const allFindings    = [];
+  const semgrepTargets = (files || []).filter((f) => isSemgrepTargetPath(f, config));
+
+  // ── SAST ──────────────────────────────────────────────────────────────────
   if (semgrepTargets.length > 0) {
-    // SAST — owasp-top10 via @pensar/semgrep-node
     const sast = await runSemgrep({ files: semgrepTargets });
     allFindings.push(...sast);
 
-    // Custom rules — patterns not covered by owasp-top10 ruleset
-    for (const filePath of semgrepTargets) {
-      const custom = scanFileWithCustomRules(filePath);
-      allFindings.push(...custom);
+    if (config.custom_rules !== false) {
+      for (const filePath of semgrepTargets) {
+        const custom = scanFileWithCustomRules(filePath);
+        allFindings.push(...custom);
+      }
     }
   } else {
     // eslint-disable-next-line no-console
     console.log('sec-gate: no relevant staged/tracked source files; skipping SAST');
   }
 
-  // SCA (only when dependency lockfiles or go module files are staged)
-  if (staged && !depChanged) {
+  // ── SCA ───────────────────────────────────────────────────────────────────
+  if (config.sca === false) {
+    // eslint-disable-next-line no-console
+    console.log('sec-gate: SCA disabled in config; skipping');
+  } else if (staged && !depChanged) {
     // eslint-disable-next-line no-console
     console.log('sec-gate: dependency files not staged; skipping SCA');
   } else {
     const fs = require('fs');
 
-    // Detect which Node lockfile exists — support npm, pnpm and yarn
     const nodeLockfiles = [
-      'pnpm-lock.yaml',      // pnpm
-      'package-lock.json',   // npm
-      'npm-shrinkwrap.json', // npm (legacy)
-      'yarn.lock'            // yarn
+      'pnpm-lock.yaml',
+      'package-lock.json',
+      'npm-shrinkwrap.json',
+      'yarn.lock'
     ];
     const foundLockfile = nodeLockfiles.find((lf) => fs.existsSync(lf));
 
@@ -87,7 +154,7 @@ async function scan({ staged }) {
       allFindings.push(...scaOsv);
     } else {
       // eslint-disable-next-line no-console
-      console.log('sec-gate: no Node lockfile found (pnpm-lock.yaml / package-lock.json / yarn.lock); skipping OSV-Scanner');
+      console.log('sec-gate: no Node lockfile found; skipping OSV-Scanner');
     }
 
     if (fs.existsSync('go.mod')) {
@@ -99,21 +166,43 @@ async function scan({ staged }) {
     }
   }
 
-  const filtered = applyInlineSuppressions({ findings: allFindings });
+  // ── Apply inline suppressions ─────────────────────────────────────────────
+  const afterSuppressions = applyInlineSuppressions({ findings: allFindings });
 
-  if (filtered.length > 0) {
+  // ── Apply config filters (excluded rules, paths, severity threshold) ──────
+  const { remaining, excluded, belowThreshold } = applyConfigFilters(afterSuppressions, config);
+
+  // Report what was filtered (only in verbose — summarised in one line)
+  if (excluded.length > 0) {
+    // eslint-disable-next-line no-console
+    console.log(`sec-gate: filtered ${excluded.length} finding(s) by excluded rules/paths`);
+  }
+  if (belowThreshold.length > 0) {
+    // eslint-disable-next-line no-console
+    console.log(`sec-gate: filtered ${belowThreshold.length} finding(s) below severity threshold (${config.severity_threshold})`);
+  }
+
+  // ── Block or pass ─────────────────────────────────────────────────────────
+  if (remaining.length > 0) {
     // eslint-disable-next-line no-console
     console.log('\nsec-gate: SECURITY FINDINGS (commit blocked):');
-    for (const f of filtered) console.log(formatFinding(f));
+    for (const f of remaining) console.log(formatFinding(f));
+
+    // Show hint about severity threshold if there are lower-severity findings
+    if (belowThreshold.length > 0 && config.severity_threshold === 'all') {
+      // eslint-disable-next-line no-console
+      console.log('\n  TIP: Set severity_threshold in .sec-gate.yml to only block on high/critical.');
+    }
+
     process.exit(1);
   }
 
-  // ── Success summary ────────────────────────────────────────────────────────
+  // ── Success summary ───────────────────────────────────────────────────────
   const checks = [];
   if (semgrepTargets.length > 0) {
     checks.push(`SAST (${semgrepTargets.length} file${semgrepTargets.length > 1 ? 's' : ''})`);
   }
-  if (depChanged || !staged) {
+  if (config.sca !== false && (depChanged || !staged)) {
     const fs = require('fs');
     const nodeLockfilesCheck = ['pnpm-lock.yaml', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock'];
     const foundLock = nodeLockfilesCheck.find((lf) => fs.existsSync(lf));

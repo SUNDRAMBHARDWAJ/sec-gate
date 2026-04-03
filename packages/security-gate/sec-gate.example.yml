@@ -1,0 +1,39 @@
+# .sec-gate.yml — sec-gate configuration
+# Copy this file to your project root as .sec-gate.yml and customize.
+# All fields are optional. Defaults shown below.
+
+# Severity threshold — only block commits on findings at or above this level.
+# Options: all (default), critical, high, medium, low
+# Examples:
+#   severity_threshold: all       → block on any finding (most strict)
+#   severity_threshold: high      → block on high + critical only
+#   severity_threshold: critical  → block only on critical findings
+severity_threshold: all
+
+# Rule IDs to exclude globally (never report these, even if found).
+# The defaults below exclude the highest false-positive rules.
+# Set to [] to re-enable everything.
+exclude_rules:
+  - path-join-resolve-traversal
+  - detect-non-literal-regexp
+  - detect-non-literal-fs-filename
+
+# File paths/patterns to skip entirely (supports glob patterns).
+# Useful for test files, mocks, fixtures where dangerous patterns are intentional.
+exclude_paths:
+  - "**/__tests__/**"
+  - "**/*.test.js"
+  - "**/*.test.ts"
+  - "**/*.spec.js"
+  - "**/*.spec.ts"
+  - "**/test/**"
+  - "**/tests/**"
+  - "**/mocks/**"
+  - "**/fixtures/**"
+
+# Enable/disable dependency vulnerability scanning (SCA).
+# Disable if you manage dependencies with a separate tool (Snyk, Dependabot etc.)
+sca: true
+
+# Enable/disable custom security rules (hardcoded secrets, insecure random, etc.)
+custom_rules: true

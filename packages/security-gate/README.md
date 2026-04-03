@@ -126,6 +126,40 @@ doSomethingDangerous();
 
 ---
 
+## Configuration (optional)
+
+Create a `.sec-gate.yml` file in your project root to tune the scanner:
+
+```yaml
+# .sec-gate.yml
+
+# Only block commits on high/critical findings (medium/low are reported but don't block)
+severity_threshold: high
+
+# Exclude specific high-noise rules
+exclude_rules:
+  - path-join-resolve-traversal
+  - detect-non-literal-regexp
+  - detect-non-literal-fs-filename
+
+# Skip test/mock files
+exclude_paths:
+  - "**/__tests__/**"
+  - "**/*.test.js"
+  - "**/*.spec.ts"
+  - "**/mocks/**"
+
+# Disable SCA if you use Snyk/Dependabot separately
+sca: true
+
+# Disable custom rules
+custom_rules: true
+```
+
+A full example with all options is at `sec-gate.example.yml` inside the package.
+
+---
+
 ## Bypass (emergency only)
 
 ```bash
