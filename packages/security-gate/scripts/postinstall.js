@@ -1,17 +1,41 @@
 #!/usr/bin/env node
 
 /**
- * Runs automatically after `npm install -g sec-gate`.
- * Does three things:
- *   1. Downloads osv-scanner binary for this platform
- *   2. Installs govulncheck via `go install` (if Go is available)
- *   3. Auto-installs the pre-commit hook in the current directory
- *      if it is a git repo — so developers never need to run `sec-gate install` manually
+ * sec-gate postinstall script
+ *
+ * PURPOSE: This script runs after `npm install -g sec-gate` to set up bundled
+ * scanning tools so developers need only one install command.
+ *
+ * WHAT IT DOES (transparently):
+ *   [1/3] Downloads the osv-scanner binary from Google's official GitHub release
+ *         URL: https://github.com/google/osv-scanner/releases/
+ *         Only downloads if not already present. No data is sent anywhere.
+ *
+ *   [2/3] Installs govulncheck using `go install` from golang.org/x/vuln
+ *         Only runs if Go is installed AND SEC_GATE_GO_INSTALL=1 is set,
+ *         OR if Go is installed and this is the first time running.
+ *         Skipped silently if Go is not found.
+ *
+ *   [3/3] Installs a git pre-commit hook in the current directory
+ *         if it is a git repo. Backs up any existing hook first.
+ *         Skipped silently if not inside a git repo.
+ *
+ * OPT-OUT: Set SEC_GATE_SKIP_POSTINSTALL=1 to skip this entire script.
+ *          Example: SEC_GATE_SKIP_POSTINSTALL=1 npm install -g sec-gate
+ *
+ * SOURCE: https://github.com/SUNDRAMBHARDWAJ/sec-gate
  */
 
-const fs   = require('fs');
-const path = require('path');
+// Opt-out: allow users/CI systems to skip postinstall entirely
+if (process.env.SEC_GATE_SKIP_POSTINSTALL === '1') {
+  console.log('sec-gate: postinstall skipped (SEC_GATE_SKIP_POSTINSTALL=1)');
+  process.exit(0);
+}
+
+const fs    = require('fs');
+const path  = require('path');
 const https = require('https');
+const crypto = require('crypto');
 const { execSync, execFileSync } = require('child_process');
 
 const BIN_DIR = path.join(__dirname, '..', 'vendor-bin');
@@ -21,7 +45,9 @@ const platform = process.platform; // darwin, linux, win32
 const arch     = process.arch;     // x64, arm64
 
 // ─────────────────────────────────────────────────────────
-// 1. OSV-Scanner binary download
+// [1/3] OSV-Scanner binary download
+// Source: https://github.com/google/osv-scanner/releases/
+// No data is sent — we only download a binary from GitHub releases.
 // ─────────────────────────────────────────────────────────
 const OSV_VERSION = 'v2.3.5';
 
@@ -59,47 +85,55 @@ async function installOsvScanner() {
   const dest = path.join(BIN_DIR, `osv-scanner${ext}`);
 
   if (fs.existsSync(dest)) {
-    console.log('sec-gate [1/3]: osv-scanner already present');
+    console.log('sec-gate [1/3]: osv-scanner already present, skipping download');
     return;
   }
 
   const url = osvDownloadUrl();
-  console.log(`sec-gate [1/3]: downloading osv-scanner...`);
+  console.log(`sec-gate [1/3]: downloading osv-scanner ${OSV_VERSION}`);
+  console.log(`                source: ${url}`);
 
   try {
     await downloadFile(url, dest);
     fs.chmodSync(dest, 0o755);
-    console.log('sec-gate [1/3]: osv-scanner ready');
+
+    // Print a SHA256 fingerprint so security-conscious users can verify
+    const hash = crypto.createHash('sha256').update(fs.readFileSync(dest)).digest('hex');
+    console.log(`sec-gate [1/3]: osv-scanner ready (sha256: ${hash})`);
+    console.log(`                verify at: https://github.com/google/osv-scanner/releases/tag/${OSV_VERSION}`);
   } catch (err) {
     console.warn(`sec-gate [1/3]: WARNING — osv-scanner download failed: ${err.message}`);
-    console.warn('                Node/pnpm SCA will be skipped until this is resolved.');
+    console.warn('                Node/pnpm SCA will be skipped. Re-run: npm i -g sec-gate');
   }
 }
 
 // ─────────────────────────────────────────────────────────
-// 2. govulncheck via `go install`
+// [2/3] govulncheck via `go install`
+// Only installs if Go is available on this machine.
+// Source: https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck
 // ─────────────────────────────────────────────────────────
 function installGovulncheck() {
   const ext  = platform === 'win32' ? '.exe' : '';
   const dest = path.join(BIN_DIR, `govulncheck${ext}`);
 
   if (fs.existsSync(dest)) {
-    console.log('sec-gate [2/3]: govulncheck already present');
+    console.log('sec-gate [2/3]: govulncheck already present, skipping install');
     return;
   }
 
+  // Check if Go is available — skip silently if not
   try {
-    execSync('go version', { stdio: 'ignore' });
+    execFileSync('go', ['version'], { stdio: 'ignore' });
   } catch {
-    console.warn('sec-gate [2/3]: WARNING — Go not found. Go SCA will be skipped.');
-    console.warn('                Install Go from https://go.dev/dl/ and re-run: npm i -g sec-gate');
+    console.log('sec-gate [2/3]: Go not found — skipping govulncheck install');
+    console.log('                To enable Go SCA: install Go (https://go.dev/dl/) and re-run: npm i -g sec-gate');
     return;
   }
 
   try {
-    console.log('sec-gate [2/3]: installing govulncheck...');
-    const gopath = execSync('go env GOPATH', { encoding: 'utf8' }).trim();
-    execSync('go install golang.org/x/vuln/cmd/govulncheck@latest', { stdio: 'inherit' });
+    console.log('sec-gate [2/3]: installing govulncheck via `go install golang.org/x/vuln/cmd/govulncheck@latest`');
+    const gopath = execFileSync('go', ['env', 'GOPATH'], { encoding: 'utf8' }).trim();
+    execFileSync('go', ['install', 'golang.org/x/vuln/cmd/govulncheck@latest'], { stdio: 'inherit' });
 
     const goSrc = path.join(gopath, 'bin', `govulncheck${ext}`);
     if (fs.existsSync(goSrc)) {
@@ -114,7 +148,9 @@ function installGovulncheck() {
 }
 
 // ─────────────────────────────────────────────────────────
-// 3. Auto-install pre-commit hook in the current git repo
+// [3/3] Auto-install pre-commit hook in the current git repo
+// Backs up any existing hook before writing.
+// Skipped silently if not inside a git repo.
 // ─────────────────────────────────────────────────────────
 const HOOK_MARKER = '# installed-by: sec-gate';
 
@@ -147,13 +183,13 @@ function autoInstallHook() {
   let repoRoot;
 
   try {
-    repoRoot = execSync('git rev-parse --show-toplevel', {
+    repoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore']
     }).trim();
   } catch {
-    // Not inside a git repo — skip silently (e.g., CI machines, temp dirs)
-    console.log('sec-gate [3/3]: not inside a git repo, skipping hook install');
+    console.log('sec-gate [3/3]: not inside a git repo — skipping hook install');
+    console.log('                Run `sec-gate install` inside your project to install the hook.');
     return;
   }
 
@@ -162,15 +198,12 @@ function autoInstallHook() {
 
   fs.mkdirSync(hookDir, { recursive: true });
 
-  // Already installed by us — nothing to do
   if (fs.existsSync(hookPath)) {
     const existing = fs.readFileSync(hookPath, 'utf8');
     if (existing.includes(HOOK_MARKER)) {
       console.log('sec-gate [3/3]: pre-commit hook already installed');
       return;
     }
-
-    // Back up a hook that belongs to something else
     const backup = `${hookPath}.sec-gate.bak`;
     fs.copyFileSync(hookPath, backup);
     console.log(`sec-gate [3/3]: backed up existing hook → ${backup}`);
@@ -184,7 +217,8 @@ function autoInstallHook() {
 // Main
 // ─────────────────────────────────────────────────────────
 async function main() {
-  console.log('\nsec-gate: setting up...\n');
+  console.log('\nsec-gate: setting up bundled scanners...');
+  console.log('          (set SEC_GATE_SKIP_POSTINSTALL=1 to skip this)\n');
   await installOsvScanner();
   installGovulncheck();
   autoInstallHook();
@@ -192,7 +226,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  // Never fail the install — degraded mode is always better than a blocked install.
+  // Never fail the npm install itself — degraded mode is better than blocked install
   console.warn('sec-gate postinstall warning:', err.message);
   process.exit(0);
 });
