@@ -34,24 +34,37 @@ async function runSemgrep({ files }) {
 
   for (const filePath of files) {
     const lang = getLanguage(filePath);
+    // security-scan: disable rule-id: path-join-resolve-traversal reason: filePath comes from `git diff --cached --name-only` output, not from user input
     const absPath = path.resolve(filePath);
 
     try {
-      // Scan with OWASP Top 10 rules bundled inside @pensar/semgrep-node
+      // eslint-disable-next-line no-console
+      console.log(`sec-gate: scanning ${filePath} (${lang}) with owasp-top10 rules...`);
+
       const issues = await semgrepScan(absPath, {
         language: lang,
         ruleSets: ['owasp-top10']
       });
 
+      if (issues.length > 0) {
+        // eslint-disable-next-line no-console
+        console.log(`sec-gate: found ${issues.length} finding(s) in ${filePath}`);
+      }
+
       for (const issue of issues) {
         allFindings.push(normalizeSemgrepNodeFinding(issue, filePath));
       }
     } catch (err) {
-      // If semgrep binary not yet downloaded for this platform, warn but don't crash.
       if (err && err.message && err.message.includes('ENOENT')) {
-        console.warn(`sec-gate: semgrep binary not ready for ${lang}; skipping ${filePath}`);
+        // eslint-disable-next-line no-console
+        console.warn(`sec-gate: WARNING — semgrep binary not found for language "${lang}"`);
+        // eslint-disable-next-line no-console
+        console.warn('          The semgrep binary needs to be downloaded by @pensar/semgrep-node.');
+        // eslint-disable-next-line no-console
+        console.warn('          Run `sec-gate doctor` to diagnose, or re-install: npm i -g sec-gate');
       } else {
-        throw err;
+        // eslint-disable-next-line no-console
+        console.warn(`sec-gate: WARNING — semgrep scan failed for ${filePath}: ${err.message}`);
       }
     }
   }

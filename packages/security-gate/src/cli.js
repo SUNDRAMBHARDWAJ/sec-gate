@@ -2,7 +2,16 @@ const path = require('path');
 
 function usage() {
   // eslint-disable-next-line no-console
-  console.log(`sec-gate - OWASP Top 10 security gate\n\nUsage:\n  sec-gate install\n  sec-gate scan --staged\n\nCommands:\n  install   Installs the local git pre-commit hook for this repo\n  scan      Runs SAST/SCA checks (supports --staged)\n`);
+  console.log([
+    'sec-gate - OWASP Top 10 security gate',
+    '',
+    'Usage:',
+    '  sec-gate install        Install the pre-commit hook in this repo',
+    '  sec-gate scan           Scan all tracked files',
+    '  sec-gate scan --staged  Scan only staged files (used by pre-commit hook)',
+    '  sec-gate doctor         Check all components are installed and working',
+    ''
+  ].join('\n'));
 }
 
 function parseArgs(argv) {
@@ -35,6 +44,12 @@ async function run() {
   if (cmd === 'scan') {
     const { scan } = require('./commands/scan');
     await scan({ staged: !!args.staged });
+    return;
+  }
+
+  if (cmd === 'doctor') {
+    const { doctor } = require('./commands/doctor');
+    await doctor();
     return;
   }
 
