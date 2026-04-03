@@ -4,10 +4,12 @@ const { runSemgrep } = require('../scanners/semgrep');
 const { runOsvScanner } = require('../scanners/osv');
 const { runGovulncheck } = require('../scanners/govulncheck');
 const { applyInlineSuppressions } = require('../suppressions/inlineTag');
+const { scanFileWithCustomRules } = require('../../rules/custom-security');
 
 function formatFinding(f) {
   const loc = f.line ? `${f.path}:${f.line}` : f.path;
-  return `- ${loc} [${f.checkId}] ${f.message}`;
+  const owasp = f.owasp ? ` (${f.owasp})` : '';
+  return `- ${loc} [${f.checkId}]${owasp}\n  ${f.message}`;
 }
 
 function isSemgrepTargetPath(p) {
@@ -34,16 +36,21 @@ async function scan({ staged }) {
   console.log(`sec-gate: scan started (${staged ? 'staged files' : 'tracked files'})`);
 
   const allFindings = [];
-
   const semgrepTargets = (files || []).filter(isSemgrepTargetPath);
 
-  // SAST / misconfig
   if (semgrepTargets.length > 0) {
+    // SAST — owasp-top10 via @pensar/semgrep-node
     const sast = await runSemgrep({ files: semgrepTargets });
     allFindings.push(...sast);
+
+    // Custom rules — patterns not covered by owasp-top10 ruleset
+    for (const filePath of semgrepTargets) {
+      const custom = scanFileWithCustomRules(filePath);
+      allFindings.push(...custom);
+    }
   } else {
     // eslint-disable-next-line no-console
-    console.log('sec-gate: no relevant staged/tracked source files for Semgrep; skipping SAST');
+    console.log('sec-gate: no relevant staged/tracked source files; skipping SAST');
   }
 
   // SCA (only when dependency lockfiles or go module files are staged)
