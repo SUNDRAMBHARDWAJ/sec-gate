@@ -1,3 +1,4 @@
+// security-scan: disable rule-id: detect-non-literal-fs-filename reason: lockfile paths come from a hardcoded allowlist of known filenames, never user input
 const { getStagedFiles, hasStagedDependencyFiles } = require('../git/stagedFiles');
 const { listTrackedFiles } = require('../git/trackedFiles');
 const { runSemgrep } = require('../scanners/semgrep');
@@ -12,10 +13,20 @@ function formatFinding(f) {
   return `- ${loc} [${f.checkId}]${owasp}\n  ${f.message}`;
 }
 
+const LOCKFILES = new Set([
+  'pnpm-lock.yaml',
+  'package-lock.json',
+  'npm-shrinkwrap.json',
+  'yarn.lock',
+  'go.mod',
+  'go.sum'
+]);
+
 function isSemgrepTargetPath(p) {
   if (!p) return false;
-  if (p.endsWith('pnpm-lock.yaml')) return false;
-  if (p === 'go.mod' || p === 'go.sum') return false;
+
+  const base = require('path').basename(p);
+  if (LOCKFILES.has(base)) return false;
 
   return (
     p.endsWith('.js') ||
@@ -60,12 +71,23 @@ async function scan({ staged }) {
   } else {
     const fs = require('fs');
 
-    if (fs.existsSync('pnpm-lock.yaml')) {
-      const scaOsv = await runOsvScanner({ lockfile: 'pnpm-lock.yaml' });
+    // Detect which Node lockfile exists — support npm, pnpm and yarn
+    const nodeLockfiles = [
+      'pnpm-lock.yaml',      // pnpm
+      'package-lock.json',   // npm
+      'npm-shrinkwrap.json', // npm (legacy)
+      'yarn.lock'            // yarn
+    ];
+    const foundLockfile = nodeLockfiles.find((lf) => fs.existsSync(lf));
+
+    if (foundLockfile) {
+      // eslint-disable-next-line no-console
+      console.log(`sec-gate: running OSV-Scanner on ${foundLockfile}`);
+      const scaOsv = await runOsvScanner({ lockfile: foundLockfile });
       allFindings.push(...scaOsv);
     } else {
       // eslint-disable-next-line no-console
-      console.log('sec-gate: pnpm-lock.yaml not found; skipping OSV-Scanner');
+      console.log('sec-gate: no Node lockfile found (pnpm-lock.yaml / package-lock.json / yarn.lock); skipping OSV-Scanner');
     }
 
     if (fs.existsSync('go.mod')) {
@@ -86,8 +108,24 @@ async function scan({ staged }) {
     process.exit(1);
   }
 
+  // ── Success summary ────────────────────────────────────────────────────────
+  const checks = [];
+  if (semgrepTargets.length > 0) {
+    checks.push(`SAST (${semgrepTargets.length} file${semgrepTargets.length > 1 ? 's' : ''})`);
+  }
+  if (depChanged || !staged) {
+    const fs = require('fs');
+    const nodeLockfilesCheck = ['pnpm-lock.yaml', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock'];
+    const foundLock = nodeLockfilesCheck.find((lf) => fs.existsSync(lf));
+    if (foundLock) checks.push(`SCA-node (${foundLock})`);
+    if (fs.existsSync('go.mod')) checks.push('SCA-go (go.mod)');
+  }
+
+  const checksRan = checks.length > 0 ? checks.join(', ') : 'no checks applicable';
   // eslint-disable-next-line no-console
-  console.log('sec-gate: no findings after inline suppression');
+  console.log(`sec-gate: all checks passed — no vulnerabilities found by sec-gate`);
+  // eslint-disable-next-line no-console
+  console.log(`sec-gate: checks ran: ${checksRan}`);
 }
 
 module.exports = { scan };

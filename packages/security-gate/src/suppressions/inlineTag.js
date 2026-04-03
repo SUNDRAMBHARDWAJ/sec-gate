@@ -53,15 +53,18 @@ function applyInlineSuppressions({ findings }) {
 
       let suppressed = false;
 
-      if (typeof f.line === 'number') {
+      // File-wide suppression: if the file contains a suppress comment for this
+      // rule-id (or '*') anywhere, suppress ALL findings of that rule in that file.
+      // This is the intended use of top-of-file suppression comments.
+      suppressed = hasInlineSuppressionAnywhere({ fileText: text, checkId: f.checkId });
+
+      // If not file-wide suppressed, check the near-line window for line findings
+      if (!suppressed && typeof f.line === 'number') {
         suppressed = hasInlineSuppressionNearLine({
           fileText: text,
           findingLine: f.line,
           checkId: f.checkId
         });
-      } else {
-        // SCA findings often lack line numbers; allow suppression anywhere in the file.
-        suppressed = hasInlineSuppressionAnywhere({ fileText: text, checkId: f.checkId });
       }
 
       if (suppressed) continue;

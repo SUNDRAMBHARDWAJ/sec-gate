@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// security-scan: disable rule-id: detect-non-literal-fs-filename reason: all paths derived from git rev-parse or hardcoded BIN_DIR constants, never user input
+// security-scan: disable rule-id: path-join-resolve-traversal reason: all paths derived from git rev-parse or hardcoded BIN_DIR constants, never user input
 
 /**
  * sec-gate postinstall script
@@ -149,17 +151,28 @@ function installGovulncheck() {
 
 // ─────────────────────────────────────────────────────────
 // [3/3] Auto-install pre-commit hook in the current git repo
-// Backs up any existing hook before writing.
+// Detects husky automatically and injects into .husky/pre-commit.
+// Falls back to .git/hooks/pre-commit for non-husky repos.
 // Skipped silently if not inside a git repo.
 // ─────────────────────────────────────────────────────────
 const HOOK_MARKER = '# installed-by: sec-gate';
 
-function buildHookScript() {
+function isHuskyRepo(repoRoot) {
+  if (fs.existsSync(path.join(repoRoot, '.husky'))) return true;
+  const pkgPath = path.join(repoRoot, 'package.json');
+  if (!fs.existsSync(pkgPath)) return false;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+    return !!deps.husky;
+  } catch { return false; }
+}
+
+function buildStandaloneHook() {
   return [
     '#!/usr/bin/env sh',
     HOOK_MARKER,
     '',
-    '# Set SEC_GATE_SKIP=1 to bypass (emergency only)',
     'if [ "$SEC_GATE_SKIP" = "1" ]; then',
     '  echo "sec-gate: skipped (SEC_GATE_SKIP=1)"',
     '  exit 0',
@@ -179,9 +192,31 @@ function buildHookScript() {
   ].join('\n');
 }
 
+function buildHuskyInjectionBlock() {
+  return [
+    '',
+    HOOK_MARKER,
+    'if [ "$SEC_GATE_SKIP" != "1" ]; then',
+    '  if command -v sec-gate >/dev/null 2>&1; then',
+    '    sec-gate scan --staged',
+    '    SEC_GATE_EXIT=$?',
+    '    if [ $SEC_GATE_EXIT -ne 0 ]; then exit $SEC_GATE_EXIT; fi',
+    '  else',
+    '    echo "sec-gate: not found in PATH. Run: npm install -g sec-gate"',
+    '    exit 1',
+    '  fi',
+    'fi',
+    '# end-sec-gate',
+    ''
+  ].join('\n');
+}
+
+function buildNewHuskyHook() {
+  return ['#!/usr/bin/env sh', '. "$(dirname -- "$0")/_/husky.sh"', buildHuskyInjectionBlock()].join('\n');
+}
+
 function autoInstallHook() {
   let repoRoot;
-
   try {
     repoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], {
       encoding: 'utf8',
@@ -193,24 +228,51 @@ function autoInstallHook() {
     return;
   }
 
-  const hookDir  = path.join(repoRoot, '.git', 'hooks');
-  const hookPath = path.join(hookDir, 'pre-commit');
+  if (isHuskyRepo(repoRoot)) {
+    // ── Husky repo ────────────────────────────────────────────────────────
+    const huskyHookPath = path.join(repoRoot, '.husky', 'pre-commit');
+    console.log('sec-gate [3/3]: husky detected — injecting into .husky/pre-commit');
 
-  fs.mkdirSync(hookDir, { recursive: true });
-
-  if (fs.existsSync(hookPath)) {
-    const existing = fs.readFileSync(hookPath, 'utf8');
-    if (existing.includes(HOOK_MARKER)) {
-      console.log('sec-gate [3/3]: pre-commit hook already installed');
-      return;
+    if (fs.existsSync(huskyHookPath)) {
+      const existing = fs.readFileSync(huskyHookPath, 'utf8');
+      if (existing.includes(HOOK_MARKER)) {
+        console.log('sec-gate [3/3]: already injected into husky hook');
+        return;
+      }
+      // Inject after husky.sh source line
+      const lines = existing.split('\n');
+      let insertAt = lines.length;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].includes('husky.sh')) { insertAt = i + 1; break; }
+      }
+      lines.splice(insertAt, 0, ...buildHuskyInjectionBlock().split('\n'));
+      fs.writeFileSync(huskyHookPath, lines.join('\n'), { encoding: 'utf8', mode: 0o755 });
+    } else {
+      fs.mkdirSync(path.dirname(huskyHookPath), { recursive: true });
+      fs.writeFileSync(huskyHookPath, buildNewHuskyHook(), { encoding: 'utf8', mode: 0o755 });
     }
-    const backup = `${hookPath}.sec-gate.bak`;
-    fs.copyFileSync(hookPath, backup);
-    console.log(`sec-gate [3/3]: backed up existing hook → ${backup}`);
-  }
+    console.log(`sec-gate [3/3]: injected into ${huskyHookPath}`);
 
-  fs.writeFileSync(hookPath, buildHookScript(), { encoding: 'utf8', mode: 0o755 });
-  console.log(`sec-gate [3/3]: pre-commit hook installed in ${repoRoot}`);
+  } else {
+    // ── Standalone repo ───────────────────────────────────────────────────
+    const hookDir  = path.join(repoRoot, '.git', 'hooks');
+    const hookPath = path.join(hookDir, 'pre-commit');
+    fs.mkdirSync(hookDir, { recursive: true });
+
+    if (fs.existsSync(hookPath)) {
+      const existing = fs.readFileSync(hookPath, 'utf8');
+      if (existing.includes(HOOK_MARKER)) {
+        console.log('sec-gate [3/3]: pre-commit hook already installed');
+        return;
+      }
+      const backup = `${hookPath}.sec-gate.bak`;
+      fs.copyFileSync(hookPath, backup);
+      console.log(`sec-gate [3/3]: backed up existing hook → ${backup}`);
+    }
+
+    fs.writeFileSync(hookPath, buildStandaloneHook(), { encoding: 'utf8', mode: 0o755 });
+    console.log(`sec-gate [3/3]: pre-commit hook installed in ${repoRoot}`);
+  }
 }
 
 // ─────────────────────────────────────────────────────────

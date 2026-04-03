@@ -1,3 +1,4 @@
+const path = require('path');
 const { execSync } = require('child_process');
 
 function getStagedFiles() {
@@ -17,8 +18,15 @@ function getStagedFiles() {
 
 function hasStagedDependencyFiles(files) {
   if (!files || files.length === 0) return false;
-  const depNames = new Set(['pnpm-lock.yaml', 'go.mod', 'go.sum']);
-  return files.some((f) => depNames.has(f));
+  const depNames = new Set([
+    'pnpm-lock.yaml',       // pnpm
+    'package-lock.json',    // npm
+    'npm-shrinkwrap.json',  // npm (legacy)
+    'yarn.lock',            // yarn
+    'go.mod',               // Go
+    'go.sum'                // Go
+  ]);
+  return files.some((f) => depNames.has(path.basename(f)));
 }
 
 module.exports = { getStagedFiles, hasStagedDependencyFiles };

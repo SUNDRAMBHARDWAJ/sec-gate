@@ -10,6 +10,7 @@ function usage() {
     '  sec-gate scan           Scan all tracked files',
     '  sec-gate scan --staged  Scan only staged files (used by pre-commit hook)',
     '  sec-gate doctor         Check all components are installed and working',
+    '  sec-gate --version      Print the installed version',
     ''
   ].join('\n'));
 }
@@ -19,6 +20,7 @@ function parseArgs(argv) {
   for (const a of argv) {
     if (a === '--staged') args.staged = true;
     else if (a === '--help' || a === '-h') args.help = true;
+    else if (a === '--version' || a === '-v') args.version = true;
     else args._.push(a);
   }
   return args;
@@ -27,6 +29,13 @@ function parseArgs(argv) {
 async function run() {
   const argv = process.argv.slice(2);
   const args = parseArgs(argv);
+
+  if (args.version) {
+    const { version } = require('../package.json');
+    // eslint-disable-next-line no-console
+    console.log(`sec-gate v${version}`);
+    process.exit(0);
+  }
 
   if (args.help || args._.length === 0) {
     usage();
