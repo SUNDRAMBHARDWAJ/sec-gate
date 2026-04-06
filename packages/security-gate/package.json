@@ -1,6 +1,6 @@
 {
   "name": "sec-gate",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "description": "Pre-commit security gate for OWASP Top 10 2021 — SAST, SCA and misconfig checks for Node/Express, Go and React codebases",
   "author": {
     "name": "Sundram Bhardwaj",
@@ -19,7 +19,9 @@
     "postinstall": "node scripts/postinstall.js"
   },
   "dependencies": {
-    "@pensar/semgrep-node": "^1.2.4"
+    "@pensar/semgrep-node": "^1.2.4",
+    "acorn": "^8.16.0",
+    "acorn-walk": "^8.3.5"
   },
   "keywords": [
     "security",

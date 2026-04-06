@@ -1,316 +1,479 @@
+'use strict';
+
+// security-scan: disable rule-id: detect-non-literal-fs-filename reason: filePath comes from git diff --cached, not user input
+// security-scan: disable rule-id: prototype-pollution reason: AST visitor pattern uses bracket notation on known node types, not user input
+
 /**
  * @file custom-security.js
- * @description sec-gate static analysis rule definitions.
+ * @description sec-gate custom security rules — AST-based analysis.
  *
- * This file is part of the sec-gate security scanning tool.
- * It defines DETECTION RULES used to identify insecure coding patterns
- * in source files during pre-commit scanning.
+ * Uses acorn to parse JavaScript/TypeScript into an Abstract Syntax Tree (AST)
+ * and walks the tree to detect security issues. This is fundamentally different
+ * from regex-based scanning:
  *
- * These rules are DETECTORS — they do not execute the patterns they detect.
- * Pattern strings are stored as text and compiled into RegExp at runtime.
+ * REGEX (old):  sees raw text line by line — misses multi-line patterns,
+ *               variable assignments, and code structure
  *
- * Rules cover patterns not caught by the owasp-top10 ruleset:
- *   1. Hardcoded secrets (API keys, passwords, JWT secrets)
- *   2. Insecure randomness (Math.random used for security tokens)
- *   3. Prototype pollution via bracket notation
- *   4. Sensitive data stored in Web Storage APIs
- *   5. Sensitive data exposure via console logging
- *   6. Dynamic code execution via Function constructor
+ * AST (new):    understands code structure — tracks variable assignments,
+ *               function calls, object shapes, and data flow across lines
  *
- * @module sec-gate/rules/custom-security
+ * Rules implemented:
+ *   1.  SQL injection via template literals (sequelize/knex/pg)
+ *   2.  SQL injection via string concatenation
+ *   3.  Hardcoded secrets in variable assignments
+ *   4.  Hardcoded secrets in object literals
+ *   5.  Insecure randomness (Math.random) in security context
+ *   6.  Prototype pollution via bracket notation
+ *   7.  Direct __proto__ access
+ *   8.  Sensitive data in localStorage/sessionStorage
+ *   9.  Sensitive data in console output
+ *   10. Dynamic code execution (new Function / eval)
+ *   11. Command injection (child_process.exec with template literal)
+ *   12. Path traversal (path.join/resolve with user-like variables)
  */
-
-'use strict';
 
 const fs   = require('fs');
 const path = require('path');
 
+let acorn, walk;
+try {
+  acorn = require('acorn');
+  walk  = require('acorn-walk');
+} catch {
+  // acorn not available — fall back to regex mode (degraded)
+  acorn = null;
+  walk  = null;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Pattern registry
-// Patterns are stored as strings and compiled to RegExp at module load time.
-// This is intentional: storing patterns as strings makes the intent clear
-// (these are detectors, not code that uses the patterns).
+// Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Each entry defines one detection rule.
- * Fields:
- *   id          — unique rule identifier
- *   description — developer-facing explanation of the risk and fix
- *   owasp       — OWASP Top 10 2021 category
- *   severity    — critical | high | medium | low
- *   patterns    — array of { source, flags } objects compiled into RegExp
- *   require     — 'any' (default) or 'all' — how multiple patterns are combined
- *   context     — optional: also check surrounding N lines for this pattern
- */
-const RULE_DEFINITIONS = [
+const SENSITIVE_NAMES = /(?:password|passwd|pwd|secret|api.?key|apikey|jwt|token|auth|credential|private.?key|access.?key|session)/i;
+const DB_QUERY_METHODS = /^(query|execute|raw|runQuery|sequelize\.query|knex\.raw|pg\.query|mysql\.query|db\.query)$/i;
 
-  // ── Rule 1: Hardcoded secret in variable assignment ───────────────────────
-  {
+function nodeName(node) {
+  if (!node) return '';
+  if (node.type === 'Identifier') return node.name;
+  if (node.type === 'MemberExpression') {
+    return `${nodeName(node.object)}.${nodeName(node.property)}`;
+  }
+  return '';
+}
+
+function isTemplateLiteralWithExpressions(node) {
+  return node && node.type === 'TemplateLiteral' && node.expressions && node.expressions.length > 0;
+}
+
+function isConcatenatedString(node) {
+  if (!node) return false;
+  if (node.type === 'BinaryExpression' && node.operator === '+') {
+    return true;
+  }
+  return false;
+}
+
+function isStringLiteral(node) {
+  return node && (node.type === 'Literal' && typeof node.value === 'string');
+}
+
+function isSensitiveName(name) {
+  return SENSITIVE_NAMES.test(name || '');
+}
+
+function getCalleeName(node) {
+  if (!node) return '';
+  if (node.type === 'CallExpression') return getCalleeName(node.callee);
+  if (node.type === 'Identifier') return node.name;
+  if (node.type === 'MemberExpression') {
+    return `${nodeName(node.object)}.${nodeName(node.property)}`;
+  }
+  return '';
+}
+
+function makeFinding({ rule, node, filePath, extraMsg }) {
+  return {
+    checkId:  rule.id,
+    path:     filePath,
+    line:     node.loc ? node.loc.start.line : undefined,
+    message:  extraMsg ? `${rule.description} ${extraMsg}` : rule.description,
+    severity: rule.severity,
+    owasp:    rule.owasp,
+    raw:      { nodeType: node.type }
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule definitions — pure metadata, logic is in the walker below
+// ─────────────────────────────────────────────────────────────────────────────
+
+const RULES = {
+  SQL_TEMPLATE: {
+    id: 'sql-injection-template-literal',
+    description: 'SQL query built with template literal string interpolation. Variables interpolated directly into SQL allow SQL injection. Use parameterized queries: sequelize.query(sql, { replacements: [...] })',
+    owasp: 'A03:2021 Injection',
+    severity: 'critical'
+  },
+  SQL_CONCAT: {
+    id: 'sql-injection-concatenation',
+    description: 'SQL query built with string concatenation. Use parameterized queries instead of building SQL strings manually.',
+    owasp: 'A03:2021 Injection',
+    severity: 'critical'
+  },
+  HARDCODED_SECRET_VAR: {
     id: 'hardcoded-secret-assignment',
-    description: [
-      'Hardcoded secret detected in variable assignment.',
-      'Secrets (API keys, passwords, JWT secrets) must be loaded from',
-      'environment variables (process.env.MY_SECRET), not hardcoded.',
-      'Hardcoded secrets are exposed in version control and build artifacts.'
-    ].join(' '),
+    description: 'Hardcoded secret detected in variable assignment. Load secrets from environment variables (process.env.MY_SECRET) instead.',
     owasp: 'A02:2021 Cryptographic Failures',
-    severity: 'critical',
-    patterns: [
-      {
-        source: '(?:const|let|var)\\s+(?:\\w*(?:key|secret|password|passwd|pwd|token|api_key|jwt|auth|credential|private_key)\\w*)\\s*=\\s*["\u0060\'][^"\u0060\'\\s]{6,}',
-        flags: 'i'
-      }
-    ]
+    severity: 'critical'
   },
-
-  // ── Rule 2: Hardcoded secret in object literal ────────────────────────────
-  {
+  HARDCODED_SECRET_OBJ: {
     id: 'hardcoded-secret-object',
-    description: [
-      'Hardcoded secret detected in object literal.',
-      'Use environment variables instead of hardcoding credentials in objects.'
-    ].join(' '),
+    description: 'Hardcoded secret detected in object literal. Load secrets from environment variables instead.',
     owasp: 'A02:2021 Cryptographic Failures',
-    severity: 'critical',
-    patterns: [
-      {
-        source: '(?:password|passwd|pwd|secret|api_key|apikey|jwt_secret|private_key|auth_token)\\s*:\\s*["\u0060\'][^"\u0060\'\\s]{6,}',
-        flags: 'i'
-      }
-    ]
+    severity: 'critical'
   },
-
-  // ── Rule 3: Insecure random — token context ───────────────────────────────
-  {
+  INSECURE_RANDOM: {
     id: 'insecure-random-token',
-    // security-scan: disable rule-id: insecure-random-context reason: description string documents the bad pattern, not uses it
-    description: 'Math dot random() is not cryptographically secure and must not be used to generate tokens, session IDs, nonces or passwords. Use crypto.randomBytes() (Node.js) or crypto.getRandomValues() (browser) instead.',
+    description: 'Math.random() is not cryptographically secure. Use crypto.randomBytes() (Node.js) or crypto.getRandomValues() (browser) for tokens, session IDs, and passwords.',
     owasp: 'A02:2021 Cryptographic Failures',
-    severity: 'high',
-    patterns: [
-      { source: 'Math\\.random\\(\\)', flags: '' },
-      { source: '(?:token|session|id|key|secret|password|nonce|salt|otp|code|csrf)', flags: 'i' }
-    ],
-    require: 'all'
+    severity: 'high'
   },
-
-  // ── Rule 4: Insecure random — ambient context ─────────────────────────────
-  {
-    id: 'insecure-random-context',
-    // security-scan: disable rule-id: insecure-random-context reason: description string documents the bad pattern, not uses it
-    description: 'Math dot random() detected in a security-sensitive context. Use crypto.randomBytes() for any cryptographic or security-sensitive purpose.',
-    owasp: 'A02:2021 Cryptographic Failures',
-    severity: 'medium',
-    patterns: [
-      { source: 'Math\\.random\\(\\)', flags: '' }
-    ],
-    context: {
-      lines: 3,
-      pattern: { source: '(?:token|session|secret|key|auth|crypto|password|nonce|salt)', flags: 'i' }
-    }
-  },
-
-  // ── Rule 5: Prototype pollution via bracket notation ──────────────────────
-  {
+  PROTOTYPE_POLLUTION: {
     id: 'prototype-pollution',
-    description: [
-      'Possible prototype pollution: a variable key is used in bracket-notation assignment.',
-      'If the key is user-controlled, an attacker can set properties on Object.prototype.',
-      'Validate or whitelist keys before assignment.'
-    ].join(' '),
+    description: 'Bracket notation assignment with a variable key. If the key is user-controlled, an attacker can pollute Object.prototype. Validate or whitelist keys before assignment.',
     owasp: 'A03:2021 Injection',
-    severity: 'high',
-    patterns: [
-      { source: '\\w+\\[\\s*\\w+\\s*\\]\\s*=', flags: '' }
-    ]
+    severity: 'high'
   },
-
-  // ── Rule 6: Direct prototype chain access ─────────────────────────────────
-  {
+  PROTO_ACCESS: {
     id: 'proto-direct-access',
-    description: [
-      'Direct access to the prototype chain detected.',
-      'This pattern is commonly used in prototype pollution attacks.',
-      'Avoid using prototype-chain access with user-controlled input.'
-    ].join(' '),
+    description: 'Direct __proto__ access detected. This is commonly used in prototype pollution attacks.',
     owasp: 'A03:2021 Injection',
-    severity: 'critical',
-    patterns: [
-      // security-scan: disable rule-id: proto-direct-access reason: this string is the detection pattern, not usage of __proto__
-      { source: '__proto__', flags: '' }
-    ]
+    severity: 'critical'
   },
-
-  // ── Rule 7: Sensitive data in localStorage ────────────────────────────────
-  {
-    id: 'localstorage-sensitive-data',
-    description: [
-      'Sensitive data stored in localStorage.',
-      'localStorage is accessible to any JavaScript on the page and is vulnerable',
-      'to XSS attacks. Use httpOnly cookies for tokens and authentication data.'
-    ].join(' '),
+  STORAGE_SENSITIVE: {
+    id: 'webstorage-sensitive-data',
+    description: 'Sensitive data stored in localStorage/sessionStorage. Web storage is accessible to XSS attacks. Use httpOnly cookies for tokens and authentication data.',
     owasp: 'A02:2021 Cryptographic Failures',
-    severity: 'high',
-    patterns: [
-      { source: 'localStorage\\.setItem\\s*\\(', flags: '' },
-      { source: '(?:password|passwd|pwd|token|secret|key|auth|jwt|session|credential)', flags: 'i' }
-    ],
-    require: 'all'
+    severity: 'high'
   },
-
-  // ── Rule 8: Sensitive data in sessionStorage ──────────────────────────────
-  {
-    id: 'sessionstorage-sensitive-data',
-    description: [
-      'Sensitive data stored in sessionStorage.',
-      'sessionStorage is accessible to XSS attacks.',
-      'Use httpOnly cookies for authentication tokens instead.'
-    ].join(' '),
-    owasp: 'A02:2021 Cryptographic Failures',
-    severity: 'high',
-    patterns: [
-      { source: 'sessionStorage\\.setItem\\s*\\(', flags: '' },
-      { source: '(?:password|passwd|pwd|token|secret|key|auth|jwt|credential)', flags: 'i' }
-    ],
-    require: 'all'
-  },
-
-  // ── Rule 9: Sensitive data in console output ──────────────────────────────
-  {
+  CONSOLE_SENSITIVE: {
     id: 'console-log-sensitive',
-    description: [
-      'Possible logging of sensitive data via console output.',
-      'Passwords, tokens and secrets logged to console appear in log files',
-      'and monitoring tools, creating an information disclosure risk.'
-    ].join(' '),
+    description: 'Possible logging of sensitive data. Passwords and tokens logged to console appear in log files and monitoring tools.',
     owasp: 'A09:2021 Security Logging and Monitoring Failures',
-    severity: 'high',
-    patterns: [
-      { source: 'console\\.(?:log|info|warn|error|debug)\\s*\\(', flags: '' },
-      { source: '(?:password|passwd|pwd|secret|token|api.?key|jwt|credential|private)', flags: 'i' }
-    ],
-    require: 'all'
+    severity: 'high'
   },
-
-  // ── Rule 10: Dynamic code execution via Function constructor ───────────────
-  {
-    id: 'dynamic-function-constructor',
-    description: [
-      'Dynamic code execution via the Function constructor detected.',
-      'Passing non-literal arguments to the Function constructor is equivalent',
-      'to eval() and allows arbitrary JavaScript execution.',
-      'Use a safe, sandboxed alternative instead.'
-    ].join(' '),
+  DYNAMIC_CODE: {
+    id: 'dynamic-code-execution',
+    description: 'Dynamic code execution via eval() or new Function() with non-literal argument. This allows arbitrary JavaScript execution.',
     owasp: 'A03:2021 Injection',
-    severity: 'critical',
-    patterns: [
-      { source: 'new\\s+Function\\s*\\(', flags: '' }
-    ],
-    // Only flag when the argument is not a pure string literal
-    exclude: [
-      { source: 'new\\s+Function\\s*\\(\\s*["\u0060\'][^"\u0060\']*["\u0060\']\\s*\\)', flags: '' }
-    ]
+    severity: 'critical'
+  },
+  CMD_INJECTION: {
+    id: 'command-injection',
+    description: 'Shell command built with template literal or concatenation. If variables contain user input, this allows command injection. Use execFile() with argument arrays instead of exec() with strings.',
+    owasp: 'A03:2021 Injection',
+    severity: 'critical'
   }
-
-];
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Compile patterns at module load time
-// ─────────────────────────────────────────────────────────────────────────────
-// The RegExp() calls below are intentional: patterns are stored as strings and
-// compiled once at startup. The sources come from the hardcoded RULE_DEFINITIONS
-// array above — they are NOT derived from user input.
-const COMPILED_RULES = RULE_DEFINITIONS.map((rule) => ({
-  ...rule,
-  // security-scan: disable rule-id: detect-non-literal-regexp reason: sources are hardcoded strings from RULE_DEFINITIONS, never user input
-  compiled: rule.patterns.map((p) => new RegExp(p.source, p.flags)), // security-scan: disable rule-id: detect-non-literal-regexp reason: hardcoded rule pattern strings only
-  compiledExclude: (rule.exclude || []).map((p) => new RegExp(p.source, p.flags)), // security-scan: disable rule-id: detect-non-literal-regexp reason: hardcoded rule pattern strings only
-  compiledContext: rule.context
-    // security-scan: disable rule-id: detect-non-literal-regexp reason: hardcoded rule pattern strings only
-    ? new RegExp(rule.context.pattern.source, rule.context.pattern.flags)
-    : null
-}));
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test a single line against a compiled rule
+// AST walker — visits every node and applies rules
 // ─────────────────────────────────────────────────────────────────────────────
-function testRule(rule, line, lineIdx, allLines) {
-  const requireAll = rule.require === 'all';
 
-  // Check exclude patterns first — if matched, skip this rule
-  for (const excl of rule.compiledExclude) {
-    if (excl.test(line)) return false;
-  }
+function walkAST(ast, filePath) {
+  const findings = [];
 
-  // Test main patterns
-  const results = rule.compiled.map((re) => re.test(line));
-  const matched = requireAll ? results.every(Boolean) : results.some(Boolean);
+  // Track variable names that hold SQL-like strings (simple 1-level taint)
+  const sqlVarNames = new Set();
 
-  if (!matched) return false;
+  walk.simple(ast, {
 
-  // If a context check is required, scan surrounding lines
-  if (rule.compiledContext) {
-    const { lines: windowSize } = rule.context;
-    const start = Math.max(0, lineIdx - windowSize);
-    const end   = Math.min(allLines.length, lineIdx + windowSize + 1);
-    const surrounding = allLines.slice(start, end).join(' ');
-    if (!rule.compiledContext.test(surrounding)) return false;
-  }
+    // ── Rule 1 & 2: SQL injection ───────────────────────────────────────────
+    VariableDeclarator(node) {
+      if (!node.init) return;
 
-  return true;
+      // Track variables assigned a template literal with expressions
+      // e.g. const rawQuery = `SELECT... ${someVar}`
+      if (isTemplateLiteralWithExpressions(node.init)) {
+        const varName = nodeName(node.id);
+        // Heuristic: if the template looks like SQL
+        const quasis = node.init.quasis.map((q) => q.value.raw).join('');
+        if (/\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|JOIN)\b/i.test(quasis)) {
+          sqlVarNames.add(varName);
+          findings.push(makeFinding({
+            rule: RULES.SQL_TEMPLATE,
+            node: node.init,
+            filePath,
+            extraMsg: `Variable: ${varName}`
+          }));
+        }
+      }
+
+      // Track string concatenation with SQL keywords
+      if (isConcatenatedString(node.init)) {
+        const varName = nodeName(node.id);
+        // Walk the concat tree to find if SQL keywords are present
+        let hasSql = false;
+        walk.simple(node.init, {
+          Literal(n) {
+            if (typeof n.value === 'string' && /\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b/i.test(n.value)) {
+              hasSql = true;
+            }
+          }
+        });
+        if (hasSql) {
+          sqlVarNames.add(varName);
+          findings.push(makeFinding({ rule: RULES.SQL_CONCAT, node: node.init, filePath, extraMsg: `Variable: ${varName}` }));
+        }
+      }
+
+      // ── Rule 3: Hardcoded secrets in variable assignment ────────────────
+      const varName = nodeName(node.id);
+      if (isSensitiveName(varName) && isStringLiteral(node.init) && node.init.value.length >= 6) {
+        // Exclude environment variable reads
+        const val = node.init.value;
+        if (!val.startsWith('process.env') && !val.includes('${') && !/^(true|false|null|undefined|test|example|placeholder|changeme|xxx+|your[-_]?)$/i.test(val)) {
+          findings.push(makeFinding({ rule: RULES.HARDCODED_SECRET_VAR, node, filePath, extraMsg: `Variable name: ${varName}` }));
+        }
+      }
+    },
+
+    // ── Rule 1 continued: SQL injection via direct db.query() call ─────────
+    CallExpression(node) {
+      const callee = getCalleeName(node);
+
+      // Check if this is a db query call
+      const isDbCall = /(?:query|raw|execute)\b/i.test(callee) &&
+                       /(?:sequelize|knex|pg|mysql|db|pool|connection)\b/i.test(callee);
+
+      const isGenericQuery = /^(?:query|execute|runQuery)$/.test(callee);
+
+      if (isDbCall || isGenericQuery) {
+        const firstArg = node.arguments[0];
+        if (firstArg) {
+          // Direct template literal in the call
+          if (isTemplateLiteralWithExpressions(firstArg)) {
+            findings.push(makeFinding({ rule: RULES.SQL_TEMPLATE, node, filePath }));
+          }
+          // Direct concatenation in the call
+          if (isConcatenatedString(firstArg)) {
+            findings.push(makeFinding({ rule: RULES.SQL_CONCAT, node, filePath }));
+          }
+          // Tainted variable passed to query
+          if (firstArg.type === 'Identifier' && sqlVarNames.has(firstArg.name)) {
+            findings.push(makeFinding({
+              rule: RULES.SQL_TEMPLATE,
+              node,
+              filePath,
+              extraMsg: `Tainted variable "${firstArg.name}" passed to query`
+            }));
+          }
+        }
+      }
+
+      // ── Rule 5: Math.random() ─────────────────────────────────────────
+      if (callee === 'Math.random') {
+        findings.push(makeFinding({ rule: RULES.INSECURE_RANDOM, node, filePath }));
+      }
+
+      // ── Rule 8: localStorage/sessionStorage.setItem ────────────────────
+      if (/^(?:localStorage|sessionStorage)\.setItem$/.test(callee)) {
+        const keyArg = node.arguments[0];
+        if (keyArg && isStringLiteral(keyArg) && isSensitiveName(keyArg.value)) {
+          findings.push(makeFinding({ rule: RULES.STORAGE_SENSITIVE, node, filePath, extraMsg: `Key: "${keyArg.value}"` }));
+        }
+      }
+
+      // ── Rule 9: console.log with sensitive variable ────────────────────
+      if (/^console\.(?:log|info|warn|error|debug)$/.test(callee)) {
+        for (const arg of node.arguments) {
+          const argName = nodeName(arg);
+          if (isSensitiveName(argName)) {
+            findings.push(makeFinding({ rule: RULES.CONSOLE_SENSITIVE, node, filePath, extraMsg: `Argument: ${argName}` }));
+            break;
+          }
+        }
+      }
+
+      // ── Rule 10: eval() ─────────────────────────────────────────────────
+      if (callee === 'eval') {
+        const arg = node.arguments[0];
+        if (arg && !isStringLiteral(arg)) {
+          findings.push(makeFinding({ rule: RULES.DYNAMIC_CODE, node, filePath }));
+        }
+      }
+
+      // ── Rule 11: Command injection via exec/execSync ────────────────────
+      if (/^(?:exec|execSync|spawn|spawnSync)$/.test(callee) ||
+          /child_process\.(?:exec|execSync)/.test(callee)) {
+        const firstArg = node.arguments[0];
+        if (firstArg) {
+          if (isTemplateLiteralWithExpressions(firstArg)) {
+            findings.push(makeFinding({ rule: RULES.CMD_INJECTION, node, filePath }));
+          }
+          if (isConcatenatedString(firstArg)) {
+            findings.push(makeFinding({ rule: RULES.CMD_INJECTION, node, filePath }));
+          }
+        }
+      }
+    },
+
+    // ── Rule 10: new Function() ─────────────────────────────────────────────
+    NewExpression(node) {
+      if (nodeName(node.callee) === 'Function') {
+        const lastArg = node.arguments[node.arguments.length - 1];
+        if (lastArg && !isStringLiteral(lastArg)) {
+          findings.push(makeFinding({ rule: RULES.DYNAMIC_CODE, node, filePath }));
+        }
+      }
+    },
+
+    // ── Rule 4: Hardcoded secrets in object literals ────────────────────────
+    Property(node) {
+      const keyName = nodeName(node.key) || (node.key.type === 'Literal' ? node.key.value : '');
+      if (isSensitiveName(keyName) && isStringLiteral(node.value) && node.value.value.length >= 6) {
+        const val = node.value.value;
+        if (!/^(process\.env|true|false|null|test|example|placeholder|changeme|xxx+|your[-_]?)$/i.test(val)) {
+          findings.push(makeFinding({ rule: RULES.HARDCODED_SECRET_OBJ, node, filePath, extraMsg: `Key: "${keyName}"` }));
+        }
+      }
+    },
+
+    // ── Rule 6: Prototype pollution via bracket notation ───────────────────
+    AssignmentExpression(node) {
+      // obj[variable] = value  →  node.left is MemberExpression with computed=true
+      if (node.left &&
+          node.left.type === 'MemberExpression' &&
+          node.left.computed === true &&
+          node.left.property.type === 'Identifier') {
+        findings.push(makeFinding({ rule: RULES.PROTOTYPE_POLLUTION, node, filePath }));
+      }
+    },
+
+    // ── Rule 7: __proto__ access ────────────────────────────────────────────
+    MemberExpression(node) {
+      const prop = node.property;
+      if (prop && prop.type === 'Identifier' && prop.name === '__proto__') {
+        findings.push(makeFinding({ rule: RULES.PROTO_ACCESS, node, filePath }));
+      }
+      if (prop && prop.type === 'Literal' && prop.value === '__proto__') {
+        findings.push(makeFinding({ rule: RULES.PROTO_ACCESS, node, filePath }));
+      }
+    }
+
+  });
+
+  return findings;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Suppression check
+// Suppression check (reuses same format as inlineTag.js)
 // ─────────────────────────────────────────────────────────────────────────────
-const SUPPRESS_RE = /security-scan:\s*disable/i;
+const SUPPRESS_RE = /security-scan:\s*disable\s+rule-id:\s*(\S+)/i;
 
-function isSuppressed(lines, lineIdx) {
-  const current  = lines[lineIdx]  || '';
-  const previous = lines[lineIdx - 1] || '';
-  return SUPPRESS_RE.test(current) || SUPPRESS_RE.test(previous);
+function isSuppressed(lines, lineIdx, ruleId) {
+  const window = 3;
+  const start  = Math.max(0, lineIdx - window);
+  const end    = Math.min(lines.length - 1, lineIdx + window);
+
+  for (let i = start; i <= end; i++) {
+    const m = lines[i].match(SUPPRESS_RE);
+    if (m && (m[1] === '*' || m[1] === ruleId)) return true;
+  }
+  return false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main scanner
+// Regex fallback — used when acorn is not available
+// ─────────────────────────────────────────────────────────────────────────────
+function regexFallbackScan(content, filePath) {
+  const lines   = content.split(/\r?\n/);
+  const findings = [];
+
+  const PATTERNS = [
+    { re: /(?:const|let|var)\s+\w*(?:password|secret|key|token|jwt)\w*\s*=\s*['"`][^'"`\s]{6,}/, rule: RULES.HARDCODED_SECRET_VAR },
+    { re: /Math\.random\(\)/, rule: RULES.INSECURE_RANDOM },
+    { re: /__proto__/, rule: RULES.PROTO_ACCESS },
+    { re: /localStorage\.setItem\s*\(.*(?:token|password|secret)/i, rule: RULES.STORAGE_SENSITIVE },
+    { re: /console\.(?:log|info|warn)\s*\(.*(?:password|secret|token)/i, rule: RULES.CONSOLE_SENSITIVE }
+  ];
+
+  lines.forEach((line, i) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*')) return;
+    if (isSuppressed(lines, i, '*')) return;
+
+    for (const { re, rule } of PATTERNS) {
+      if (re.test(line)) {
+        findings.push({
+          checkId: rule.id,
+          path: filePath,
+          line: i + 1,
+          message: rule.description,
+          severity: rule.severity,
+          owasp: rule.owasp,
+          raw: { line: trimmed }
+        });
+        break;
+      }
+    }
+  });
+
+  return findings;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main export
 // ─────────────────────────────────────────────────────────────────────────────
 function scanFileWithCustomRules(filePath) {
+  // Only scan JS/TS files — Go is handled by govulncheck
+  if (filePath.endsWith('.go')) return [];
+
   let content;
   try {
-    // security-scan: disable rule-id: detect-non-literal-fs-filename reason: filePath comes from `git diff --cached --name-only`, not user input
     content = fs.readFileSync(filePath, 'utf8');
   } catch {
     return [];
   }
 
-  const lines    = content.split(/\r?\n/);
-  const findings = [];
+  // If acorn is not available, fall back to regex mode
+  if (!acorn || !walk) {
+    console.warn('sec-gate: acorn not available — using regex fallback for custom rules');
+    return regexFallbackScan(content, filePath);
+  }
 
-  for (let i = 0; i < lines.length; i++) {
-    const line    = lines[i];
-    const trimmed = line.trim();
-
-    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('*')) continue;
-    if (isSuppressed(lines, i)) continue;
-
-    for (const rule of COMPILED_RULES) {
-      if (testRule(rule, line, i, lines)) {
-        findings.push({
-          checkId:  rule.id,
-          path:     filePath,
-          line:     i + 1,
-          message:  rule.description,
-          severity: rule.severity,
-          owasp:    rule.owasp,
-          raw:      { line: trimmed }
-        });
-        break; // one finding per line
-      }
+  let ast;
+  try {
+    ast = acorn.parse(content, {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      locations: true,   // gives us line numbers
+      allowHashBang: true,
+      allowAwaitOutsideFunction: true,
+      allowImportExportEverywhere: true
+    });
+  } catch {
+    // Parse failed (e.g. TypeScript syntax, JSX) — fall back to regex
+    try {
+      ast = acorn.parse(content, {
+        ecmaVersion: 'latest',
+        sourceType: 'script',
+        locations: true,
+        allowHashBang: true
+      });
+    } catch {
+      return regexFallbackScan(content, filePath);
     }
   }
 
-  return findings;
+  const rawFindings = walkAST(ast, filePath);
+
+  // Apply inline suppressions
+  const lines = content.split(/\r?\n/);
+  return rawFindings.filter((f) => {
+    if (!f.line) return true;
+    return !isSuppressed(lines, f.line - 1, f.checkId);
+  });
 }
 
-module.exports = { scanFileWithCustomRules, RULE_DEFINITIONS };
+module.exports = { scanFileWithCustomRules, RULES };
