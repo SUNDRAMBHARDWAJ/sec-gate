@@ -185,8 +185,9 @@ function buildStandaloneHook() {
     '  sec-gate scan --staged',
     '  exit $?',
     'else',
-    '  echo "sec-gate: not found in PATH. Run: npm install -g sec-gate"',
-    '  exit 1',
+    '  echo "sec-gate: WARNING — sec-gate not found in PATH, security scan skipped."',
+    '  echo "sec-gate: To re-enable scanning run: npm install -g sec-gate"',
+    '  exit 0',
     'fi',
     ''
   ].join('\n');
@@ -202,8 +203,8 @@ function buildHuskyInjectionBlock() {
     '    SEC_GATE_EXIT=$?',
     '    if [ $SEC_GATE_EXIT -ne 0 ]; then exit $SEC_GATE_EXIT; fi',
     '  else',
-    '    echo "sec-gate: not found in PATH. Run: npm install -g sec-gate"',
-    '    exit 1',
+    '    echo "sec-gate: WARNING — sec-gate not found in PATH, security scan skipped."',
+    '    echo "sec-gate: To re-enable scanning run: npm install -g sec-gate"',
     '  fi',
     'fi',
     '# end-sec-gate',

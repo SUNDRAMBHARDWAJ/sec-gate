@@ -1,228 +1,289 @@
-# sec-gate
+<div align="center">
 
-A pre-commit security gate that enforces **OWASP Top 10 (2021)** checks before every `git commit`.
+<img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=700&size=28&pause=1000&color=FF6B6B&center=true&vCenter=true&width=600&lines=sec-gate+%F0%9F%94%90;OWASP+Top+10+Security+Gate;Block+Vulnerabilities+Before+Commit" alt="sec-gate" />
 
-Covers:
-- **SAST** — static analysis of JS/TS/Go/React code via Semgrep (OWASP Top 10 rules + Express misconfig rules)
-- **SCA** — dependency vulnerability scanning via OSV-Scanner (pnpm) and govulncheck (Go)
-- **Misconfig** — CORS, headers, auth bypass patterns
+<br/>
 
-Supports **inline suppression** so developers can acknowledge known false positives with an explicit reason.
+[![npm version](https://img.shields.io/npm/v/sec-gate?style=for-the-badge&color=FF6B6B&labelColor=1a1a2e)](https://www.npmjs.com/package/sec-gate)
+[![npm downloads](https://img.shields.io/npm/dm/sec-gate?style=for-the-badge&color=4ECDC4&labelColor=1a1a2e)](https://www.npmjs.com/package/sec-gate)
+[![License: MIT](https://img.shields.io/badge/License-MIT-FFE66D?style=for-the-badge&labelColor=1a1a2e)](https://opensource.org/licenses/MIT)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18-43B883?style=for-the-badge&labelColor=1a1a2e)](https://nodejs.org)
+[![OWASP Top 10](https://img.shields.io/badge/OWASP-Top%2010%202021-FF6B6B?style=for-the-badge&labelColor=1a1a2e)](https://owasp.org/Top10/)
+
+<br/>
+
+> **A pre-commit security gate that automatically blocks vulnerable code before every `git commit`.**
+> Covers SAST · SCA · Misconfigurations · SQL Injection · Hardcoded Secrets and more.
+
+<br/>
+
+```
+  git commit  →  sec-gate scans  →  vulnerability?  →  BLOCKED ✗
+                                 →  clean?          →  committed ✓
+```
+
+</div>
 
 ---
 
-## Getting started — developer setup
-
-### Step 1 — Install the tool globally (once per machine)
+## ⚡ Quick Start
 
 ```bash
+# Step 1 — Install globally (once per machine)
 npm install -g sec-gate
+
+# Step 2 — Hook into your repo (once per clone)
+cd your-project
+sec-gate install
+
+# Step 3 — Commit as normal — scans run automatically
+git commit -m "your changes"
 ```
 
-This single command installs the `sec-gate` CLI and automatically downloads **osv-scanner** and **govulncheck** for you. No separate tool installs needed.
-
-> You only run this once per machine, not once per project.
+> **That's it.** No config needed. No extra tools to install. Everything is bundled.
 
 ---
 
-### Step 2 — Connect it to your repo (once per cloned repo)
+## 🛡️ What gets scanned
+
+<div align="center">
+
+| Layer | Tool | What it catches |
+|:---:|:---:|:---|
+| ![SAST](https://img.shields.io/badge/SAST-Semgrep-FF6B6B?style=flat-square) | Semgrep + AST rules | SQL injection, XSS, command injection, hardcoded secrets |
+| ![SCA](https://img.shields.io/badge/SCA-OSV--Scanner-4ECDC4?style=flat-square) | OSV-Scanner | Known CVEs in npm/pnpm/yarn dependencies |
+| ![GO](https://img.shields.io/badge/SCA-govulncheck-43B883?style=flat-square) | govulncheck | Known CVEs in Go modules |
+| ![CUSTOM](https://img.shields.io/badge/AST-Custom%20Rules-FFE66D?style=flat-square) | acorn AST walker | Prototype pollution, insecure random, eval injection |
+
+</div>
+
+---
+
+## 🔴 What blocked output looks like
+
+```
+sec-gate: scan started (staged files)
+sec-gate: excluding 3 high-noise rule(s)
+sec-gate: scanning src/services/payment.js (js) with owasp-top10 rules...
+
+sec-gate: SECURITY FINDINGS (commit blocked):
+
+- src/services/payment.js:40 [CRITICAL] [sql-injection-template-literal] (A03:2021 Injection)
+  SQL query built with template literal interpolation.
+  Use parameterized queries: sequelize.query(sql, { replacements: [...] })
+
+- src/services/payment.js:82 [LOW] [insecure-object-assign] (A01:2021)
+  Object.assign with potentially user-controlled data.
+
+- package-lock.json [OSV:GHSA-r5fr-rjxr-66jc]
+  lodash: vulnerable to Code Injection via _.template
+```
+
+## 🟢 What a clean commit looks like
+
+```
+sec-gate: scan started (staged files)
+sec-gate: excluding 3 high-noise rule(s)
+sec-gate: all checks passed — no vulnerabilities found by sec-gate
+sec-gate: checks ran: SAST (3 files), SCA-node (package-lock.json)
+```
+
+---
+
+## 🗂️ OWASP Top 10 (2021) Coverage
+
+<div align="center">
+
+| # | Category | Status |
+|:---:|:---|:---:|
+| A01 | Broken Access Control | ![covered](https://img.shields.io/badge/covered-4ECDC4?style=flat-square) |
+| A02 | Cryptographic Failures | ![covered](https://img.shields.io/badge/covered-4ECDC4?style=flat-square) |
+| A03 | Injection (SQL · XSS · CMD) | ![covered](https://img.shields.io/badge/covered-4ECDC4?style=flat-square) |
+| A04 | Insecure Design | ![covered](https://img.shields.io/badge/covered-4ECDC4?style=flat-square) |
+| A05 | Security Misconfiguration | ![covered](https://img.shields.io/badge/covered-4ECDC4?style=flat-square) |
+| A06 | Vulnerable Components | ![covered](https://img.shields.io/badge/covered-4ECDC4?style=flat-square) |
+| A07 | Authentication Failures | ![covered](https://img.shields.io/badge/covered-4ECDC4?style=flat-square) |
+| A08 | Software Integrity Failures | ![covered](https://img.shields.io/badge/covered-4ECDC4?style=flat-square) |
+| A09 | Security Logging Failures | ![covered](https://img.shields.io/badge/covered-4ECDC4?style=flat-square) |
+| A10 | Server-Side Request Forgery | ![covered](https://img.shields.io/badge/covered-4ECDC4?style=flat-square) |
+
+</div>
+
+---
+
+## 🔧 All Commands
 
 ```bash
-cd your-project      # go into the cloned repo root
-sec-gate install     # writes the pre-commit hook into .git/hooks/
-```
-
-This tells Git to run `sec-gate scan` automatically before every commit in this repo.
-
-> **You must run this in every repo you want protected.** The global install alone does not activate the hook anywhere — it just makes the `sec-gate` command available on your machine.
-
----
-
-### Step 3 — Develop normally, commit as usual
-
-```bash
-git add src/services/payment.js src/routes/user.js
-git commit -m "feat: add payment service"   # scan fires automatically here
-```
-
-No extra commands. The hook handles everything.
-
----
-
-### Full example from scratch
-
-```bash
-# On a fresh machine or a fresh clone:
-npm install -g sec-gate        # Step 1 — install tool globally (once per machine)
-cd fmt-os                      # go into your project
-sec-gate install               # Step 2 — hook up this repo (once per clone)
-
-# Now develop as normal:
-git add .
-git commit -m "my changes"    # Step 3 — scan runs automatically here
+sec-gate install        # Install/inject pre-commit hook (auto-detects husky, lefthook etc.)
+sec-gate scan           # Scan all tracked files
+sec-gate scan --staged  # Scan only staged files
+sec-gate doctor         # Diagnose installation issues
+sec-gate --version      # Print installed version
+sec-gate --help         # Show help
 ```
 
 ---
 
-## What happens on every `git commit`
+## 🔕 Suppressing False Positives
 
-```
-git commit
-    ↓
-pre-commit hook fires automatically
-    ↓
-sec-gate scan --staged
-    ↓
-┌─────────────────────────────────────────────────────┐
-│  SAST   — Semgrep scans staged .js/.ts/.go files    │
-│           against OWASP Top 10 + Express rules      │
-├─────────────────────────────────────────────────────┤
-│  SCA    — OSV-Scanner checks pnpm-lock.yaml         │
-│           govulncheck checks go.mod                 │
-│           (only when those files are staged)        │
-└─────────────────────────────────────────────────────┘
-    ↓
-Inline suppression tags filtered out
-    ↓
-Any findings? → commit BLOCKED, findings printed
-No findings?  → commit proceeds
-```
+Two formats supported — use whichever you prefer:
 
----
-
-## Commands
-
-```
-sec-gate --help
-
-  install   Installs the pre-commit hook in the current git repo
-  scan      Runs SAST/SCA checks
-              --staged   scan only staged files (used by pre-commit hook)
-              (no flag)  scan all tracked files
-```
-
----
-
-## Inline suppression
-
-If a finding is a known false positive, add a comment **near the flagged line**:
-
+**Short format** _(quick)_
 ```js
-// security-scan: disable rule-id: javascript.express.security.cors-misconfiguration.cors-misconfiguration reason: internal-only API, safe
-app.use(cors({ origin: '*' }));
+// sec-gate-disable: sql-injection-template-literal
+const rawQuery = `SELECT * FROM payments WHERE status = '${status}'`;
 ```
 
-```go
-// security-scan: disable rule-id: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command reason: input validated upstream
-exec.Command(cmd)
-```
-
-Use `rule-id: *` to suppress **all** findings near that line:
-
+**Long format** _(recommended for PRs — shows reason)_
 ```js
-// security-scan: disable rule-id: * reason: test fixture only
-doSomethingDangerous();
+// security-scan: disable rule-id: sql-injection-template-literal reason: status validated against enum
+const rawQuery = `SELECT * FROM payments WHERE status = '${status}'`;
+```
+
+**Suppress all rules on a line**
+```js
+// sec-gate-disable: *
+dangerousLegacyFunction();
 ```
 
 ---
 
-## Configuration (optional)
+## ⚙️ Configuration (`.sec-gate.yml`)
 
-Create a `.sec-gate.yml` file in your project root to tune the scanner:
+Create this file in your project root to tune the scanner:
 
 ```yaml
 # .sec-gate.yml
 
-# Only block commits on high/critical findings (medium/low are reported but don't block)
+# Block only on high/critical findings
 severity_threshold: high
 
-# Exclude specific high-noise rules
+# Exclude specific rules globally
 exclude_rules:
   - path-join-resolve-traversal
   - detect-non-literal-regexp
-  - detect-non-literal-fs-filename
 
-# Skip test/mock files
+# Skip test and mock files
 exclude_paths:
   - "**/__tests__/**"
   - "**/*.test.js"
-  - "**/*.spec.ts"
   - "**/mocks/**"
 
-# Disable SCA if you use Snyk/Dependabot separately
+# Toggle scanners
 sca: true
-
-# Disable custom rules
 custom_rules: true
 ```
 
-A full example with all options is at `sec-gate.example.yml` inside the package.
+<details>
+<summary>📋 All severity threshold options</summary>
+
+| Value | Blocks on |
+|---|---|
+| `all` (default) | Every finding |
+| `high` | High + Critical only |
+| `critical` | Critical only |
+| `medium` | Medium + High + Critical |
+| `low` | Everything (same as all) |
+
+</details>
 
 ---
 
-## Bypass (emergency only)
+## 🪝 Hook Manager Support
+
+`sec-gate install` automatically detects your hook manager — no manual config needed:
+
+<div align="center">
+
+| Tool | Detection | Auto-injected |
+|:---:|:---:|:---:|
+| ![Husky](https://img.shields.io/badge/Husky-v6%2B-FF6B6B?style=flat-square) | `.husky/` directory | ✅ `.husky/pre-commit` |
+| ![Husky](https://img.shields.io/badge/Husky-v4-FF6B6B?style=flat-square) | `package.json` hooks | ✅ prepended to command |
+| ![lefthook](https://img.shields.io/badge/lefthook-FFE66D?style=flat-square) | `lefthook.yml` | ✅ priority 1 command |
+| ![simple-git-hooks](https://img.shields.io/badge/simple--git--hooks-4ECDC4?style=flat-square) | `package.json` | ✅ prepended to command |
+| ![pre-commit](https://img.shields.io/badge/pre--commit%20(py)-43B883?style=flat-square) | `.pre-commit-config.yaml` | ✅ local hook entry |
+| ![bare git](https://img.shields.io/badge/bare%20git-lightgrey?style=flat-square) | no manager | ✅ `.git/hooks/pre-commit` |
+
+</div>
+
+---
+
+## 🔒 Supported Package Managers
+
+<div align="center">
+
+[![npm](https://img.shields.io/badge/npm-package--lock.json-CC3534?style=for-the-badge&logo=npm)](https://www.npmjs.com)
+[![pnpm](https://img.shields.io/badge/pnpm-pnpm--lock.yaml-F69220?style=for-the-badge&logo=pnpm)](https://pnpm.io)
+[![yarn](https://img.shields.io/badge/yarn-yarn.lock-2C8EBB?style=for-the-badge&logo=yarn)](https://yarnpkg.com)
+[![go](https://img.shields.io/badge/Go-go.mod-00ADD8?style=for-the-badge&logo=go)](https://go.dev)
+
+</div>
+
+---
+
+## 🚨 Emergency Bypass
 
 ```bash
+# Skip the scan for this commit only (emergency use only)
 SEC_GATE_SKIP=1 git commit -m "emergency fix"
 ```
 
+> ⚠️ This only skips the **local** pre-commit hook. CI will still catch it.
+
 ---
 
-## Auto-setup for the whole team (optional but recommended)
+## 👥 Team Auto-Setup
 
-To avoid teammates forgetting `sec-gate install`, add this to your **project's** `package.json`:
+Add to your project's `package.json` so every developer gets the hook automatically on `npm install`:
 
 ```json
-"scripts": {
-  "prepare": "sec-gate install"
+{
+  "scripts": {
+    "prepare": "sec-gate install"
+  }
 }
 ```
 
-Then the full onboarding flow for any new developer is just two commands:
+Then new developer onboarding is just:
 
 ```bash
-npm install -g sec-gate   # Step 1 — install tool globally (once per machine)
-npm install               # Step 2 — prepare script auto-runs sec-gate install
+npm install -g sec-gate   # once per machine
+npm install               # installs hook automatically via prepare script
 ```
 
-No need to remember `sec-gate install` separately — `npm install` handles it.
-
-> Tip: document these two commands in your project's `CONTRIBUTING.md` so every new joiner knows the setup.
-
 ---
 
-## GitHub Actions — CI gate + PR comments
+## 🏗️ How it works internally
 
-Copy `.github/workflows/security-gate.yml` from this repo into your project to get:
-- Full scan on every pull request
-- Automatic PR comment with findings output
-- PR check blocked if any findings remain
-
----
-
-## OWASP Top 10 (2021) coverage
-
-| # | Category | How covered |
-|---|---|---|
-| A01 | Broken Access Control | Semgrep `owasp-top10` ruleset |
-| A02 | Cryptographic Failures | Semgrep `owasp-top10` ruleset |
-| A03 | Injection | Semgrep `owasp-top10` ruleset |
-| A04 | Insecure Design | Semgrep `owasp-top10` ruleset |
-| A05 | Security Misconfiguration | Semgrep `owasp-top10` + Express rules |
-| A06 | Vulnerable Components | OSV-Scanner (pnpm) + govulncheck (Go) |
-| A07 | Authentication Failures | Semgrep `owasp-top10` ruleset |
-| A08 | Software Integrity Failures | Semgrep `owasp-top10` ruleset |
-| A09 | Logging Failures | Semgrep `owasp-top10` ruleset |
-| A10 | Server-Side Request Forgery | Semgrep `owasp-top10` ruleset |
-
----
-
-## Go SCA note
-
-`govulncheck` requires Go to be installed on the developer's machine. If Go is not present, Go SCA is skipped with a warning — the install never fails. To enable it:
-
-```bash
-# Install Go: https://go.dev/dl/
-# Then re-run:
-npm install -g sec-gate
 ```
+git commit
+    │
+    ▼
+pre-commit hook
+    │
+    ├── Load .sec-gate.yml config
+    │
+    ├── SAST ──► Semgrep (owasp-top10)
+    │        ──► AST walker (acorn) — SQL injection, secrets, prototype pollution
+    │
+    ├── SCA  ──► osv-scanner (npm/pnpm/yarn lockfile)
+    │        ──► govulncheck (go.mod)
+    │
+    ├── Apply inline suppressions (sec-gate-disable / security-scan: disable)
+    │
+    ├── Apply config filters (exclude_rules, exclude_paths, severity_threshold)
+    │
+    ├── Findings? → exit 1 → commit BLOCKED ✗
+    └── Clean?   → exit 0 → commit proceeds ✓
+```
+
+---
+
+<div align="center">
+
+**Built with ❤️ to make security automatic, not optional.**
+
+[![npm](https://img.shields.io/badge/npm-sec--gate-FF6B6B?style=for-the-badge&logo=npm)](https://www.npmjs.com/package/sec-gate)
+[![GitHub](https://img.shields.io/badge/GitHub-SUNDRAMBHARDWAJ%2Fsec--gate-181717?style=for-the-badge&logo=github)](https://github.com/SUNDRAMBHARDWAJ/sec-gate)
+
+</div>

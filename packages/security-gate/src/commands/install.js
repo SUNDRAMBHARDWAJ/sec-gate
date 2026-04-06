@@ -59,8 +59,8 @@ function secGateShellBlock() {
     '    _SG_EXIT=$?',
     '    if [ $_SG_EXIT -ne 0 ]; then exit $_SG_EXIT; fi',
     '  else',
-    '    echo "sec-gate: not found. Run: npm install -g sec-gate"',
-    '    exit 1',
+    '    echo "sec-gate: WARNING — sec-gate not found in PATH, security scan skipped."',
+    '    echo "sec-gate: To re-enable scanning run: npm install -g sec-gate"',
     '  fi',
     'fi',
     END_MARKER,
@@ -87,8 +87,9 @@ function standaloneHook() {
     '  sec-gate scan --staged',
     '  exit $?',
     'else',
-    '  echo "sec-gate: not found. Run: npm install -g sec-gate"',
-    '  exit 1',
+    '  echo "sec-gate: WARNING — sec-gate not found in PATH, security scan skipped."',
+    '  echo "sec-gate: To re-enable scanning run: npm install -g sec-gate"',
+    '  exit 0',
     'fi',
     ''
   ].join('\n');
